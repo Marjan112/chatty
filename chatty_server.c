@@ -11,7 +11,6 @@
 
 #include "utils.h"
 
-#define SERVER_PORT 6741
 #define MAX_EVENTS 64
 #define MAX_CLIENTS 10
 

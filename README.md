@@ -1,15 +1,15 @@
-# Chatty
+# ChaTTY
 
-Chat app in the terminal made in C (probably gonna rewrite it in rust)
+Chat app in terminal
 
 # Quick start
-    $ make
+    $ cargo build
 
 ## Server
-    $ ./chatty_server
+    $ cargo run --bin server
 
 ## Client
-    $ ./chatty_client
+    $ cargo run --bin client
 
 # License
 Licensed under the MIT License, see the [LICENSE](./LICENSE) file.

@@ -1,2 +1,5 @@
-chatty_client
-chatty_server
+legacy
+
+# Added by cargo
+
+/target

@@ -4,114 +4,70 @@ use mio::{
 };
 use std::{
     collections::HashMap,
-    io::{ Read, Write },
-    error::Error,
+    io::{ Read, Write, ErrorKind },
+    net::SocketAddr,
+    error::Error
 };
 
 const SERVER_PORT: usize = 6741;
-const MAX_CLIENTS: usize = 10;
-
-const LISTENER_TOKEN: Token = Token(0);
 
 struct Client {
     stream: TcpStream,
     name: String,
 }
 
-struct ServerContext {
-    poll: Poll,
-    events: Events,
-    listener: TcpListener,
+struct Server {
     clients: HashMap<Token, Client>
 }
 
-impl ServerContext {
-    fn create_and_listen() -> Self {
-        let mut ctx = ServerContext {
-            poll: Poll::new().unwrap(),
-            events: Events::with_capacity(128),
-            listener: TcpListener::bind(format!("0.0.0.0:{SERVER_PORT}").parse().unwrap()).unwrap(),
+impl Server {
+    fn new() -> Self {
+        Self {
             clients: HashMap::new()
-        };
-
-        ctx.poll.registry().register(&mut ctx.listener, LISTENER_TOKEN, Interest::READABLE).unwrap();
-
-        println!("Server listening on port {SERVER_PORT}");
-
-        ctx
+        }
     }
 
-    fn handle_events(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut next_token = Token(LISTENER_TOKEN.0 + 1);
+    fn client_incoming(&mut self, stream: TcpStream, addr: SocketAddr, token: Token) {
+        println!("[INFO]: Incoming connection from {}", addr); 
+        self.clients.insert(token, Client {
+            stream: stream,
+            name: "".to_string()
+        });
+    }
 
-        loop {
-            self.poll.poll(&mut self.events, None)?;
-
-            for event in &self.events {
-                match event.token() {
-                    LISTENER_TOKEN => {
-                        loop {
-                            match self.listener.accept() {
-                                Ok((mut stream, _)) => {
-                                    println!("Incoming connection...");
-
-                                    if self.clients.len() > MAX_CLIENTS {
-                                        println!("Cant add a new client because the server is full");
-                                        continue;
-                                    }
-
-                                    let token = next_token;
-                                    next_token.0 += 1;
-
-                                    let _ = self.poll.registry().register(&mut stream, token, Interest::READABLE.add(Interest::WRITABLE));
-                                    self.clients.insert(token, Client { stream, name: "".to_string() }); 
-                                }
-                                Err(e) => {
-                                    if e.kind() != std::io::ErrorKind::WouldBlock {
-                                        eprintln!("Failed to accept: {e}");
-                                    }
-                                    break;
-                                }
+    fn client_read(&mut self, token: Token) {
+        if let Some(client) = self.clients.get_mut(&token) {
+            let mut buf = [0u8; 128];
+            match client.stream.read(&mut buf) {
+                Ok(0) => {
+                    println!("[INFO]: '{}' disconnected", client.name);
+                    self.clients.remove(&token);
+                    return;
+                }
+                Ok(n) => {
+                    let msg = if let Ok(msg) = str::from_utf8(&buf[..n]) {
+                        msg
+                    } else {
+                        "invalid string"
+                    };
+                    if client.name.is_empty() {
+                        client.name = msg.to_string();
+                        println!("[INFO]: '{}' connected", client.name);
+                    } else {
+                        println!("[INFO]: '{}' says: {}", client.name, msg);
+                        for (client_token, client) in self.clients.iter_mut() {
+                            if *client_token != token {
+                                let _ = client.stream.write(msg.as_bytes()).map_err(|err| {
+                                    eprintln!("[ERROR]: Failed to broadcast message from {}: {}", client.name, err);
+                                });
                             }
                         }
                     }
-                    token => {
-                        if let Some(client) = self.clients.get_mut(&token) {
-                            let mut buf = [0u8; 128];
-                            match client.stream.read(&mut buf) {
-                                Ok(n) => {
-                                    if n == 0 {
-                                        println!("Client '{}' disconnected", client.name);
-                                        self.clients.remove(&token);
-                                    } else {
-                                        let msg = String::from_utf8_lossy(&buf[..n]).to_string();
-
-                                        if client.name.is_empty() {
-                                            client.name = msg.trim().to_string();
-                                            println!("Client '{}' registered", client.name);
-                                        } else {
-                                            println!("{} says: {}", client.name, msg);
-
-                                            let broadcast_msg = format!("{}: {}", client.name, msg);
-
-                                            let recipients: Vec<Token> = self.clients.keys().filter(|&&t| t != token).cloned().collect();
-
-                                            for other_token in recipients {
-                                                if let Some(other_client) = self.clients.get_mut(&other_token) {
-                                                    let _ = other_client.stream.write(broadcast_msg.as_bytes());
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    if e.kind() != std::io::ErrorKind::WouldBlock {
-                                        eprintln!("Failed to read from the client '{}': {}", self.clients[&token].name, e);
-                                        self.clients.remove(&token);
-                                    }
-                                }
-                            }
-                        }
+                }
+                Err(err) => {
+                    if err.kind() != ErrorKind::WouldBlock {
+                        eprintln!("[ERROR]: Failed to read message from '{}': {}", client.name, err);
+                        self.clients.remove(&token);
                     }
                 }
             }
@@ -120,7 +76,49 @@ impl ServerContext {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut ctx = ServerContext::create_and_listen();
-    ctx.handle_events()?;
-    Ok(())
+    let address = format!("0.0.0.0:{SERVER_PORT}");
+    let mut listener = TcpListener::bind(address.parse().unwrap()).map_err(|err| {
+        eprintln!("[ERROR]: Failed to bind {address}: {err}");
+        err
+    })?;
+    let mut poll = Poll::new().map_err(|err| {
+        eprintln!("[ERROR]: Failed to create poll object: {err}");
+        err
+    })?;
+    let mut events = Events::with_capacity(1024);
+    let mut counter = 0;
+
+    poll.registry().register(&mut listener, Token(counter), Interest::READABLE).map_err(|err| {
+        eprintln!("[ERROR]: Failed to register listener in poll object: {err}");
+        err
+    })?;
+
+    let mut server = Server::new();
+
+    println!("[INFO]: Listening to {address}...");
+    loop {
+        if let Err(err) = poll.poll(&mut events, None) {
+            eprintln!("[ERROR]: Failed to poll: {err}");
+            continue;
+        }
+        for token in events.iter().map(|ev| ev.token()) {
+            match token {
+                Token(0) => match listener.accept() {
+                    Ok((mut stream, addr)) => {
+                        counter += 1;
+                        let client_token = Token(counter);
+                        match poll.registry().register(&mut stream, client_token, Interest::READABLE) {
+                            Ok(_) => server.client_incoming(stream, addr, client_token),
+                            Err(err) => eprintln!("[ERROR]: Failed to register client in the poll object: {err}")
+                        }
+                    }
+                    Err(err) if err.kind() != ErrorKind::WouldBlock => {
+                        eprintln!("[ERROR]: Failed to accept client: {err}");
+                    }
+                    Err(_) => {}
+                },
+                token => server.client_read(token)
+            }
+        }
+    }
 }

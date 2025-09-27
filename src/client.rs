@@ -1,96 +1,86 @@
-use mio::{
-    net::TcpStream,
-    Token, Poll, Events, Interest
-};
 use std::{
-    net::Shutdown,
-    io::{self, Write, Read},
+    error::Error,
+    io::{self, Read, Write, ErrorKind},
+    net::TcpStream,
     thread,
-    sync::{Arc, Mutex},
-    error::Error
+    time::Duration
 };
-
-const RECEIVER_TOKEN: Token = Token(0);
 
 fn main() -> Result<(), Box<dyn Error>> {
+    println!("Enter the server address (ip:port):");
     let mut input_server_address = String::new();
-    print!("Enter the server address: ");
-    let _ = io::stdout().flush();
-    io::stdin().read_line(&mut input_server_address).unwrap();
-    let server_address = input_server_address.trim().parse().map_err(|error| {
-        eprintln!("Failed to parse the address: {error}");
-        error
+    io::stdin().read_line(&mut input_server_address).map_err(|err| {
+        eprintln!("[ERROR]: Failed to read server address: {err}");
+        err
+    })?;
+    let server_address = input_server_address.trim();
+
+    let mut stream = TcpStream::connect(server_address).and_then(|stream| {
+        stream.set_nonblocking(true)?;
+        Ok(stream)
+    }).map_err(|err| {
+        eprintln!("[ERROR]: Failed to connect: {err}");
+        err
     })?;
 
-    println!("Connecting...");
-    let client = Arc::new(Mutex::new(TcpStream::connect(server_address).map_err(|error| {
-        eprintln!("Failed to connect: {error}");
-        error
-    })?));
     println!("Connected");
-
-    print!("Enter your name (max 20 chars): ");
-    let _ = io::stdout().flush();
+    println!("Enter your name (4-20):");
     let mut input_name = String::new();
-    io::stdin().read_line(&mut input_name).unwrap();
+    io::stdin().read_line(&mut input_name).map_err(|err| {
+        eprintln!("[ERROR]: Failed to read name: {err}");
+        err
+    })?;
     let name = input_name.trim();
-
-    if name.len() > 20 {
-        println!("Name needs to be less than 20 chars");
-        return Ok(());
-    }
-    if name.len() < 4 {
-        println!("Name needs to be atleast 4 chars");
+    if name.len() < 4 || name.len() > 20 {
+        eprintln!("[ERROR]: Invalid name length");
         return Ok(());
     }
 
-    {
-        if let Ok(mut stream) = client.lock() {
-            let _ = stream.write(name.as_bytes());
-        }
-    }
+    let _ = stream.write(name.as_bytes());
+    println!("[INFO]: Welcome {}! To send a message just type the message and hit enter", name);
 
-    println!("Welcome {}! To send a message just type the message and hit enter", name);
-
-    let recv_client = client.clone();
-
+    let mut stream_clone = stream.try_clone()?;
     thread::spawn(move || {
-        let mut poll = Poll::new().unwrap();
-        let mut events = Events::with_capacity(8);
-
-        {
-            let mut stream = recv_client.lock().unwrap();
-            poll.registry().register(&mut *stream, RECEIVER_TOKEN, Interest::READABLE).unwrap();
-        }
-
+        let mut buf = [0u8; 128];
         loop {
-            poll.poll(&mut events, None).unwrap();
-            for event in &events {
-                if event.token() == RECEIVER_TOKEN && event.is_readable() {
-                    let mut other_client_msg = [0u8; 128];
-                    let mut stream = recv_client.lock().unwrap();
-                    if let Ok(received) = stream.read(&mut other_client_msg) {
-                        if received > 0 {
-                            println!("{}", String::from_utf8_lossy(&other_client_msg));
-                        } else if received == 0 {
-                            println!("Connection closed by server");
-                            let _ = stream.shutdown(Shutdown::Both);
-                            return;
+            match stream_clone.read(&mut buf) {
+                Ok(n) => {
+                    if n > 0 {
+                        if let Ok(msg) = str::from_utf8(&buf[..n]) {
+                            println!("{msg}");
                         }
+                    } else if n == 0 {
+                        println!("[INFO]: Server closed connection");
+                        break;
                     }
+                }
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(e) => {
+                    eprintln!("[ERROR]: {e}");
+                    break;
                 }
             }
         }
     });
 
-    let mut input_message = String::new();
     loop {
-        let _ = io::stdin().read_line(&mut input_message);
-        let message = input_message.trim();
-
-        if let Ok(mut stream) = client.lock() {
-            let _ = stream.write(message.as_bytes());
+        let mut input_msg = String::new();
+        io::stdin().read_line(&mut input_msg).map_err(|err| {
+            eprintln!("[ERROR]: Failed to read message: {err}");
+            err
+        })?;
+        let input_msg = input_msg.trim();
+        if input_msg.is_empty() {
+            continue;
         }
-        input_message.clear();
+
+        if let Err(err) = stream.write_all(input_msg.as_bytes()) {
+            eprintln!("[ERROR]: Failed to send: {err}");
+            break;
+        }
     }
+
+    Ok(())
 }

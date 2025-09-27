@@ -55,11 +55,13 @@ impl Server {
                         println!("[INFO]: '{}' connected", client.name);
                     } else {
                         println!("[INFO]: '{}' says: {}", client.name, msg);
-                        for (client_token, client) in self.clients.iter_mut() {
-                            if *client_token != token {
-                                let _ = client.stream.write(msg.as_bytes()).map_err(|err| {
-                                    eprintln!("[ERROR]: Failed to broadcast message from {}: {}", client.name, err);
-                                });
+
+                        let broadcast_msg = format!("{}: {}", client.name, msg);
+                        let recipients: Vec<Token> = self.clients.keys().filter(|&&t| t != token).cloned().collect();
+
+                        for other_token in recipients {
+                            if let Some(other_client) = self.clients.get_mut(&other_token) {
+                                let _ = other_client.stream.write(broadcast_msg.as_bytes());
                             }
                         }
                     }

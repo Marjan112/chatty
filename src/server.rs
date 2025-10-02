@@ -36,40 +36,62 @@ impl Server {
     }
 
     fn client_read(&mut self, token: Token) {
-        if let Some(client) = self.clients.get_mut(&token) {
-            let mut buf = [0u8; 128];
-            match client.stream.read(&mut buf) {
-                Ok(0) => {
-                    println!("[INFO]: '{}' disconnected", client.name);
-                    self.clients.remove(&token);
-                    return;
-                }
-                Ok(n) => {
-                    let msg = if let Ok(msg) = str::from_utf8(&buf[..n]) {
-                        msg
-                    } else {
-                        "invalid string"
-                    };
-                    if client.name.is_empty() {
-                        client.name = msg.to_string();
-                        println!("[INFO]: '{}' connected", client.name);
-                    } else {
-                        println!("[INFO]: '{}' says: {}", client.name, msg);
+        let mut buf = [0u8; 128];
 
-                        let broadcast_msg = format!("{}: {}", client.name, msg);
-                        let recipients: Vec<Token> = self.clients.keys().filter(|&&t| t != token).cloned().collect();
-
-                        for other_token in recipients {
-                            if let Some(other_client) = self.clients.get_mut(&other_token) {
-                                let _ = other_client.stream.write(broadcast_msg.as_bytes());
-                            }
-                        }
-                    }
-                }
+        let n = match self.clients.get_mut(&token) {
+            Some(client) => match client.stream.read(&mut buf) {
+                Ok(n) => n,
                 Err(err) => {
                     if err.kind() != ErrorKind::WouldBlock {
                         eprintln!("[ERROR]: Failed to read message from '{}': {}", client.name, err);
                         self.clients.remove(&token);
+                    }
+                    return;
+                }
+            }
+            None => return
+        };
+
+        if n == 0 {
+            if let Some(client) = self.clients.remove(&token) {
+                if client.name.is_empty() {
+                    match client.stream.peer_addr() {
+                        Ok(addr) => println!("[INFO]: {addr} disconnected"),
+                        Err(err) => eprintln!("[ERROR]: Failed to get address of the disconnected client: {err}")
+                    }
+                } else {
+                    println!("[INFO]: '{}' disconnected", client.name)
+                }
+            }
+            return;
+        }
+
+        let msg = match str::from_utf8(&buf[..n]) {
+            Ok(m) => m,
+            Err(_) => return
+        };
+
+        if self.clients[&token].name.is_empty() {
+            if let Some(first_line) = msg.split('\n').next() {
+                if let Some(client) = self.clients.get_mut(&token) {
+                    client.name = first_line.to_string();
+                    println!("[INFO]: '{}' connected", client.name)
+                }
+            }
+        } else {
+            let sender_name = self.clients[&token].name.clone();
+
+            for line in msg.split('\n') {
+                if !line.is_empty() {
+                    println!("[INFO]: '{}' says: {}", sender_name, line);
+
+                    let broadcast_msg = format!("{}: {}\n", sender_name, line);
+                    let recipients: Vec<Token> = self.clients.keys().filter(|&&t| t != token).cloned().collect();
+
+                    for other_token in recipients {
+                        if let Some(other_client) = self.clients.get_mut(&other_token) {
+                            let _ = other_client.stream.write(broadcast_msg.as_bytes());
+                        }
                     }
                 }
             }

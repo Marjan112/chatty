@@ -3,7 +3,6 @@ use std::{
     io::{self, Read, Write, ErrorKind},
     net::TcpStream,
     thread,
-    time::Duration
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -36,7 +35,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let _ = stream.write(name.as_bytes());
+    let _ = stream.write(input_name.as_bytes());
     println!("[INFO]: Welcome {}! To send a message just type the message and hit enter", name);
 
     let mut stream_clone = stream.try_clone()?;
@@ -47,19 +46,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Ok(n) => {
                     if n > 0 {
                         if let Ok(msg) = str::from_utf8(&buf[..n]) {
-                            println!("{msg}");
+                            for line in msg.split('\n') {
+                                if !line.is_empty() {
+                                    println!("{line}");
+                                }
+                            }
                         }
                     } else if n == 0 {
                         println!("[INFO]: Server closed connection");
                         break;
                     }
                 }
-                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(100));
-                }
                 Err(e) => {
-                    eprintln!("[ERROR]: {e}");
-                    break;
+                    if e.kind() != ErrorKind::WouldBlock {
+                        eprintln!("[ERROR]: {e}");
+                        break;
+                    }
                 }
             }
         }
@@ -71,7 +73,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             eprintln!("[ERROR]: Failed to read message: {err}");
             err
         })?;
-        let input_msg = input_msg.trim();
         if input_msg.is_empty() {
             continue;
         }

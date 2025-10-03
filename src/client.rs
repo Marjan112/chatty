@@ -3,6 +3,7 @@ use std::{
     io::{self, Read, Write, ErrorKind},
     net::TcpStream,
     thread,
+    time::Duration
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -35,8 +36,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    // TODO: I think we shouldnt ignore the write result in here
     let _ = stream.write(input_name.as_bytes());
-    println!("[INFO]: Welcome {}! To send a message just type the message and hit enter", name);
 
     let mut stream_clone = stream.try_clone()?;
     thread::spawn(move || {
@@ -62,6 +63,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         eprintln!("[ERROR]: {e}");
                         break;
                     }
+                    thread::sleep(Duration::from_millis(100));
                 }
             }
         }

@@ -35,6 +35,59 @@ impl Server {
         });
     }
 
+    fn client_broadcast(&mut self, sender_token: &Token, sender_msg: &str) {
+        let sender_name = self.clients[&sender_token].name.clone();
+
+        for line in sender_msg.split('\n') {
+            if !line.is_empty() {
+                println!("[INFO]: '{}' says: {}", sender_name, line);
+
+                let broadcast_msg = format!("{sender_name}: {line}\n");
+                let recipients: Vec<Token> = self.clients.keys().filter(|&&token| token != *sender_token).cloned().collect();
+
+                for other_token in recipients {
+                    if let Some(other_client) = self.clients.get_mut(&other_token) {
+                        let _ = other_client.stream.write(broadcast_msg.as_bytes());
+                    }
+                }
+            }
+        }
+    }
+
+    fn server_broadcast(&mut self, mut msg: String) {
+        msg.insert_str(0, "[SERVER]: ");
+        msg.push('\n');
+        for (_, client) in &mut self.clients {
+            let _ = client.stream.write(msg.as_bytes());
+        }
+    }
+
+    fn client_disconnected(&mut self, token: &Token) {
+        if let Some(client) = self.clients.remove(&token) {
+            if client.name.is_empty() {
+                match client.stream.peer_addr() {
+                    Ok(addr) => println!("[INFO]: {addr} disconnected"),
+                    Err(err) => eprintln!("[ERROR]: Failed to get address of the disconnected client: {err}")
+                }
+            } else {
+                println!("[INFO]: '{}' disconnected", client.name);
+                self.server_broadcast(format!("'{}' disconnected", client.name));
+            }
+        }
+    }
+
+    fn client_connected(&mut self, token: &Token, msg: &str) {
+        if let Some(first_line) = msg.split('\n').next() {
+            let mut client_name = String::new();
+            if let Some(client) = self.clients.get_mut(token) {
+                client.name = first_line.to_string();
+                println!("[INFO]: '{}' connected", client.name);
+                client_name.push_str(&client.name);
+            }
+            self.server_broadcast(format!("'{}' connected", client_name));
+        }
+    }
+
     fn client_read(&mut self, token: Token) {
         let mut buf = [0u8; 128];
 
@@ -53,16 +106,7 @@ impl Server {
         };
 
         if n == 0 {
-            if let Some(client) = self.clients.remove(&token) {
-                if client.name.is_empty() {
-                    match client.stream.peer_addr() {
-                        Ok(addr) => println!("[INFO]: {addr} disconnected"),
-                        Err(err) => eprintln!("[ERROR]: Failed to get address of the disconnected client: {err}")
-                    }
-                } else {
-                    println!("[INFO]: '{}' disconnected", client.name)
-                }
-            }
+            self.client_disconnected(&token);
             return;
         }
 
@@ -72,29 +116,9 @@ impl Server {
         };
 
         if self.clients[&token].name.is_empty() {
-            if let Some(first_line) = msg.split('\n').next() {
-                if let Some(client) = self.clients.get_mut(&token) {
-                    client.name = first_line.to_string();
-                    println!("[INFO]: '{}' connected", client.name)
-                }
-            }
+            self.client_connected(&token, msg);
         } else {
-            let sender_name = self.clients[&token].name.clone();
-
-            for line in msg.split('\n') {
-                if !line.is_empty() {
-                    println!("[INFO]: '{}' says: {}", sender_name, line);
-
-                    let broadcast_msg = format!("{}: {}\n", sender_name, line);
-                    let recipients: Vec<Token> = self.clients.keys().filter(|&&t| t != token).cloned().collect();
-
-                    for other_token in recipients {
-                        if let Some(other_client) = self.clients.get_mut(&other_token) {
-                            let _ = other_client.stream.write(broadcast_msg.as_bytes());
-                        }
-                    }
-                }
-            }
+            self.client_broadcast(&token, msg);
         }
     }
 }

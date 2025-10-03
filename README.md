@@ -1,6 +1,6 @@
 # ChaTTY
 
-Chat app in terminal
+Chat app in the terminal
 
 # Quick start
     $ cargo build

@@ -6,6 +6,40 @@ use std::{
     time::Duration
 };
 
+fn receive_messages(stream: &TcpStream) -> Result<(), Box<dyn Error>> {
+    let mut stream_clone = stream.try_clone()?;
+    thread::spawn(move || {
+        let mut buf = [0u8; 128];
+        loop {
+            match stream_clone.read(&mut buf) {
+                Ok(n) => {
+                    if n > 0 {
+                        if let Ok(msg) = str::from_utf8(&buf[..n]) {
+                            for line in msg.split('\n') {
+                                if !line.is_empty() {
+                                    println!("{line}");
+                                }
+                            }
+                        }
+                    } else if n == 0 {
+                        println!("[INFO]: Server closed connection");
+                        break;
+                    }
+                }
+                Err(e) => {
+                    if e.kind() != ErrorKind::WouldBlock {
+                        eprintln!("[ERROR]: {e}");
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     println!("Enter the server address (ip:port):");
     let mut input_server_address = String::new();
@@ -36,38 +70,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    // TODO: I think we shouldnt ignore the write result in here
-    let _ = stream.write(input_name.as_bytes());
+    stream.write(input_name.as_bytes()).map_err(|err| {
+        eprintln!("[ERROR]: Failed to send your name to the server: {err}");
+        err
+    })?;
 
-    let mut stream_clone = stream.try_clone()?;
-    thread::spawn(move || {
-        let mut buf = [0u8; 128];
-        loop {
-            match stream_clone.read(&mut buf) {
-                Ok(n) => {
-                    if n > 0 {
-                        if let Ok(msg) = str::from_utf8(&buf[..n]) {
-                            for line in msg.split('\n') {
-                                if !line.is_empty() {
-                                    println!("{line}");
-                                }
-                            }
-                        }
-                    } else if n == 0 {
-                        println!("[INFO]: Server closed connection");
-                        break;
-                    }
-                }
-                Err(e) => {
-                    if e.kind() != ErrorKind::WouldBlock {
-                        eprintln!("[ERROR]: {e}");
-                        break;
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                }
-            }
-        }
-    });
+    receive_messages(&stream)?;
 
     loop {
         let mut input_msg = String::new();

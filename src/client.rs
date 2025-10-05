@@ -49,10 +49,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
     let server_address = input_server_address.trim();
 
-    let mut stream = TcpStream::connect(server_address).and_then(|stream| {
-        stream.set_nonblocking(true)?;
-        Ok(stream)
-    }).map_err(|err| {
+    let mut stream = TcpStream::connect(server_address).map_err(|err| {
         eprintln!("[ERROR]: Failed to connect: {err}");
         err
     })?;
@@ -70,7 +67,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    stream.write(input_name.as_bytes()).map_err(|err| {
+    stream.write(format!("{name}\n").as_bytes()).map_err(|err| {
         eprintln!("[ERROR]: Failed to send your name to the server: {err}");
         err
     })?;
@@ -78,16 +75,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     receive_messages(&stream)?;
 
     loop {
-        let mut input_msg = String::new();
-        io::stdin().read_line(&mut input_msg).map_err(|err| {
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).map_err(|err| {
             eprintln!("[ERROR]: Failed to read message: {err}");
             err
         })?;
-        if input_msg.is_empty() {
+        let msg = input.trim();
+        if msg.is_empty() {
             continue;
         }
 
-        if let Err(err) = stream.write_all(input_msg.as_bytes()) {
+        if let Err(err) = stream.write_all(format!("{msg}\n").as_bytes()) {
             eprintln!("[ERROR]: Failed to send: {err}");
             break;
         }

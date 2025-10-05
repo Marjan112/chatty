@@ -6,6 +6,9 @@ Chat app in the terminal
     $ cargo build
 
 ## Server
+> [!WARNING]
+> The server only works on linux for now.
+
     $ cargo run --bin server
 
 ## Client

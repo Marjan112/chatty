@@ -1,6 +1,6 @@
 [package]
 name = "chatty"
-version = "0.2.0"
+version = "1.0.0"
 edition = "2024"
 
 [[bin]]
@@ -12,4 +12,6 @@ name = "client"
 path = "./src/client.rs"
 
 [dependencies]
+crossterm = "0.29.0"
 mio = { version = "1", features = ["net", "os-poll"] }
+ratatui = "0.29.0"

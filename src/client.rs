@@ -2,35 +2,63 @@ use std::{
     error::Error,
     io::{self, Read, Write, ErrorKind},
     net::TcpStream,
+    sync::{Arc, Mutex},
     thread,
     time::Duration
 };
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Layout, Constraint, Direction},
+    style::{Color, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph, Wrap},
+    Terminal
+};
 
-fn receive_messages(stream: &TcpStream) -> Result<(), Box<dyn Error>> {
+struct App {
+    messages: Vec<String>,
+    input: String,
+    running: bool
+}
+
+impl App {
+    fn new() -> Self {
+        Self {
+            messages: Vec::new(),
+            input: String::new(),
+            running: true
+        }
+    }
+}
+
+fn receive_messages(stream: &TcpStream, app: Arc<Mutex<App>>) -> Result<(), Box<dyn Error>> {
     let mut stream_clone = stream.try_clone()?;
     thread::spawn(move || {
         let mut buf = [0u8; 128];
         loop {
             match stream_clone.read(&mut buf) {
+                Ok(0) => {
+                    let mut app = app.lock().unwrap();
+                    app.messages.push("[INFO]: Server closed connection".into());
+                    app.running = false;
+                    break;
+                }
                 Ok(n) => {
-                    if n > 0 {
-                        if let Ok(msg) = str::from_utf8(&buf[..n]) {
-                            for line in msg.split('\n') {
-                                if !line.is_empty() {
-                                    println!("{line}");
-                                }
+                    if let Ok(msg) = str::from_utf8(&buf[..n]) {
+                        let mut app = app.lock().unwrap();
+                        for line in msg.split('\n') {
+                            if !line.trim().is_empty() {
+                                app.messages.push(line.trim().to_string());
                             }
                         }
-                    } else if n == 0 {
-                        println!("[INFO]: Server closed connection");
-                        break;
                     }
                 }
-                Err(e) => {
-                    if e.kind() != ErrorKind::WouldBlock {
-                        eprintln!("[ERROR]: {e}");
-                        break;
-                    }
+                Err(_) => {
                     thread::sleep(Duration::from_millis(100));
                 }
             }
@@ -72,24 +100,72 @@ fn main() -> Result<(), Box<dyn Error>> {
         err
     })?;
 
-    receive_messages(&stream)?;
+    let app = Arc::new(Mutex::new(App::new()));
+    receive_messages(&stream, app.clone())?;
 
-    loop {
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).map_err(|err| {
-            eprintln!("[ERROR]: Failed to read message: {err}");
-            err
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::new(backend)?;
+
+    while app.lock().unwrap().running {
+        terminal.draw(|frame| {
+            let area = frame.area();
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(3)].as_ref())
+                .split(area);
+
+            let app = app.lock().unwrap();
+
+            let messages: Vec<Line> = app.messages
+                .iter()
+                .rev()
+                .take((chunks[0].height as usize) - 2)
+                .rev()
+                .map(|m| Line::from(Span::raw(m.clone())))
+                .collect();
+
+            let chat = Paragraph::new(messages)
+                .block(Block::default().title("Chat").borders(Borders::ALL))
+                .wrap(Wrap { trim: true });
+            frame.render_widget(chat, chunks[0]);
+
+            let input = Paragraph::new(app.input.clone())
+                .style(Style::default().fg(Color::Yellow))
+                .block(Block::default().borders(Borders::ALL).title("You:"));
+            frame.render_widget(input, chunks[1]);
         })?;
-        let msg = input.trim();
-        if msg.is_empty() {
-            continue;
-        }
 
-        if let Err(err) = stream.write_all(format!("{msg}\n").as_bytes()) {
-            eprintln!("[ERROR]: Failed to send: {err}");
-            break;
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                let mut app = app.lock().unwrap();
+                match key.code {
+                    KeyCode::Char(c) => app.input.push(c),
+                    KeyCode::Backspace => {
+                        app.input.pop();
+                    }
+                    KeyCode::Enter => {
+                        let msg = app.input.trim().to_string();
+                        if !msg.is_empty() {
+                            if let Err(err) = stream.write(format!("{msg}\n").as_bytes()) {
+                                app.messages.push(format!("[ERROR]: Could not send message: {err}"));
+                            } else {
+                                app.messages.push(format!("You: {msg}"));
+                                app.input.clear();
+                            }
+                        }
+                    }
+                    KeyCode::Esc => app.running = false,
+                    _ => {}
+                }
+            }
         }
     }
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
 
     Ok(())
 }

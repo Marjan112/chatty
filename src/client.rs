@@ -7,7 +7,7 @@ use std::{
     time::Duration
 };
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -141,25 +141,27 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                let mut app = app.lock().unwrap();
-                match key.code {
-                    KeyCode::Char(c) => app.input.push(c),
-                    KeyCode::Backspace => {
-                        app.input.pop();
-                    }
-                    KeyCode::Enter => {
-                        let msg = app.input.trim().to_string();
-                        if !msg.is_empty() {
-                            if let Err(err) = stream.write(format!("{msg}\n").as_bytes()) {
-                                app.messages.push(format!("[ERROR]: Could not send message: {err}"));
-                            } else {
-                                app.messages.push(format!("You: {msg}"));
-                                app.input.clear();
+                if key.kind == KeyEventKind::Press {
+                    let mut app = app.lock().unwrap();
+                    match key.code {
+                        KeyCode::Char(c) => app.input.push(c),
+                        KeyCode::Backspace => {
+                            app.input.pop();
+                        }
+                        KeyCode::Enter => {
+                            let msg = app.input.trim().to_string();
+                            if !msg.is_empty() {
+                                if let Err(err) = stream.write(format!("{msg}\n").as_bytes()) {
+                                    app.messages.push(format!("[ERROR]: Could not send message: {err}"));
+                                } else {
+                                    app.messages.push(format!("You: {msg}"));
+                                    app.input.clear();
+                                }
                             }
                         }
+                        KeyCode::Esc => app.running = false,
+                        _ => {}
                     }
-                    KeyCode::Esc => app.running = false,
-                    _ => {}
                 }
             }
         }

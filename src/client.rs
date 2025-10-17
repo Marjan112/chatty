@@ -1,13 +1,13 @@
 use std::{
     error::Error,
-    io::{self, Read, Write, ErrorKind},
+    io::{self, Read, Write},
     net::TcpStream,
     sync::{Arc, Mutex},
     thread,
     time::Duration
 };
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -22,6 +22,7 @@ use ratatui::{
 
 struct App {
     messages: Vec<String>,
+    default_terminal_messages: Vec<String>, // Naming - The unsolvable computer science problem
     input: String,
     running: bool
 }
@@ -30,6 +31,7 @@ impl App {
     fn new() -> Self {
         Self {
             messages: Vec::new(),
+            default_terminal_messages: Vec::new(),
             input: String::new(),
             running: true
         }
@@ -44,7 +46,7 @@ fn receive_messages(stream: &TcpStream, app: Arc<Mutex<App>>) -> Result<(), Box<
             match stream_clone.read(&mut buf) {
                 Ok(0) => {
                     let mut app = app.lock().unwrap();
-                    app.messages.push("[INFO]: Server closed connection".into());
+                    app.default_terminal_messages.push("[INFO]: Server closed connection".to_string());
                     app.running = false;
                     break;
                 }
@@ -166,6 +168,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
+
+    for msg in &app.lock().unwrap().default_terminal_messages {
+        println!("{msg}\n");
+    }
 
     Ok(())
 }

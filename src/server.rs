@@ -62,16 +62,17 @@ impl Server {
         }
     }
 
-    fn client_disconnected(&mut self, token: &Token) {
+    fn client_disconnected(&mut self, token: &Token, reason: &str) {
         if let Some(client) = self.clients.remove(&token) {
             if client.name.is_empty() {
                 match client.stream.peer_addr() {
-                    Ok(addr) => println!("[INFO]: {addr} disconnected"),
-                    Err(err) => eprintln!("[ERROR]: Failed to get address of the disconnected client: {err}")
+                    Ok(addr) => println!("[INFO]: {addr} disconnected prematurely"),
+                    Err(err) => eprintln!("[ERROR]: Failed to get address of the prematurely disconnected client: {err}")
                 }
             } else {
-                println!("[INFO]: '{}' disconnected", client.name);
-                self.server_broadcast(format!("'{}' disconnected", client.name));
+                let disconn_msg = format!("'{}' disconnceted (reason: {})", client.name, reason);
+                println!("[INFO]: {disconn_msg}");
+                self.server_broadcast(disconn_msg);
             }
         }
     }
@@ -96,8 +97,7 @@ impl Server {
                 Ok(n) => n,
                 Err(err) => {
                     if err.kind() != ErrorKind::WouldBlock {
-                        eprintln!("[ERROR]: Failed to read message from '{}': {}", client.name, err);
-                        self.clients.remove(&token);
+                        self.client_disconnected(&token, &err.to_string());
                     }
                     return;
                 }
@@ -106,7 +106,7 @@ impl Server {
         };
 
         if n == 0 {
-            self.client_disconnected(&token);
+            self.client_disconnected(&token, "user choice");
             return;
         }
 

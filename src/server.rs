@@ -70,7 +70,12 @@ impl Server {
                     Err(err) => eprintln!("[ERROR]: Failed to get address of the prematurely disconnected client: {err}")
                 }
             } else {
-                let disconn_msg = format!("'{}' disconnceted (reason: {})", client.name, reason);
+                let disconn_msg;
+                if reason.is_empty() {
+                    disconn_msg = format!("'{}' disconnected", client.name);
+                } else {
+                    disconn_msg = format!("'{}' disconnceted (reason: {})", client.name, reason);
+                }
                 println!("[INFO]: {disconn_msg}");
                 self.server_broadcast(disconn_msg);
             }
@@ -106,7 +111,7 @@ impl Server {
         };
 
         if n == 0 {
-            self.client_disconnected(&token, "user choice");
+            self.client_disconnected(&token, "");
             return;
         }
 

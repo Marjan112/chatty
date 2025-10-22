@@ -6,44 +6,57 @@ use std::{
     thread,
     time::{Duration, Instant}
 };
-use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
 use ratatui::{
+    prelude::*,
+    crossterm::{
+        event::{self, Event},
+        execute,
+        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    },
     backend::CrosstermBackend,
     layout::{Layout, Constraint, Direction, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Terminal,
     Frame
 };
+use tui_textarea::{Input, Key, TextArea};
 
-struct App {
+const MAX_CHARS: usize = 128;
+
+struct App<'a> {
     messages: Vec<String>,
     default_terminal_messages: Vec<String>, // Naming - The unsolvable computer science problem
-    input: String,
+    textarea: TextArea<'a>,
     scroll_offset: usize,
     visible_height: usize,
     running: bool
 }
 
-impl App {
+impl<'a> App<'a> {
     fn new() -> Self {
         Self {
             messages: vec![
                 String::from("Welcome to ChaTTY!"),
                 String::from("Use UP/DOWN to scroll"),
                 String::from("Type and press Enter to send"),
+                String::from("Press ESC to exit")
             ],
             default_terminal_messages: Vec::new(),
-            input: String::new(),
+            textarea: TextArea::default(),
             scroll_offset: 0,
             visible_height: 0,
             running: true
         }
+    }
+
+    fn get_textarea_count(&self) -> usize {
+        self.textarea
+            .lines()
+            .iter()
+            .map(|line| line.bytes().count())
+            .sum()
     }
 
     fn draw_chat_window(&mut self, frame: &mut Frame, area: Rect) {
@@ -62,18 +75,23 @@ impl App {
             .collect();
 
         let chat_box = Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
             .block(Block::default().title("ChaTTY").borders(Borders::ALL))
             .style(Style::default().fg(Color::White));
 
         frame.render_widget(chat_box, area);
     }
 
-    fn draw_input_box(&self, frame: &mut Frame, area: Rect) {
-        let input = Paragraph::new(&*self.input)
-            .block(Block::default().borders(Borders::ALL).title("You:"))
-            .style(Style::default().fg(Color::Yellow));
+    fn draw_input_box(&mut self, frame: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" You: ({}/{}) ", self.get_textarea_count(), MAX_CHARS))
+            .fg(Color::Yellow);
 
-        frame.render_widget(input, area);
+        self.textarea.set_block(block);
+        self.textarea.set_cursor_line_style(Style::default());
+        self.textarea.set_placeholder_text("Your message...");
+        frame.render_widget(&self.textarea, area);
     }
 
     fn draw_ui(&mut self, frame: &mut Frame) {
@@ -104,7 +122,7 @@ impl App {
     }
 }
 
-fn receive_messages(stream: &TcpStream, app: Arc<Mutex<App>>) -> Result<thread::JoinHandle<()>, Box<dyn Error>> {
+fn receive_messages(stream: &TcpStream, app: Arc<Mutex<App<'static>>>) -> Result<thread::JoinHandle<()>, Box<dyn Error>> {
     let mut stream_clone = stream.try_clone()?;
     stream_clone.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
 
@@ -190,7 +208,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tick_rate = Duration::from_millis(200);
     let mut last_tick = Instant::now();
 
-    let app = Arc::new(Mutex::new(App::new()));
+    let app: Arc<Mutex<App<'static>>> = Arc::new(Mutex::new(App::new()));
     let join_handle = receive_messages(&stream, app.clone())?;
 
     enable_raw_mode()?;
@@ -205,29 +223,36 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    let mut app = app.lock().unwrap();
-                    match key.code {
-                        KeyCode::Char(c) => app.input.push(c),
-                        KeyCode::Backspace => {
-                            app.input.pop();
-                        }
-                        KeyCode::Enter => {
-                            let msg = app.input.trim().to_string();
-                            if !msg.is_empty() {
-                                if let Err(err) = stream.write(format!("{msg}\n").as_bytes()) {
-                                    app.messages.push(format!("[ERROR]: Could not send message: {err}"));
-                                } else {
-                                    app.messages.push(format!("You: {msg}"));
-                                    app.input.clear();
-                                }
+                let mut app = app.lock().unwrap();
+                let input = Input::from(key);
+                match input.key {
+                    Key::Esc => app.running = false,
+                    Key::Enter => {
+                        let msg = app.textarea.lines().join("\n");
+                        if !msg.trim().is_empty() {
+                            if let Err(err) = stream.write_all(format!("{msg}\n").as_bytes()) {
+                                app.messages.push(format!("[ERROR]: Could not send messages: {err}"))
+                            } else {
+                                app.messages.push(format!("You: {msg}"));
                             }
                         }
-                        KeyCode::Up => app.scroll_up(),
-                        KeyCode::Down => app.scroll_down(),
-                        KeyCode::Esc => app.running = false,
-                        _ => {}
+                        app.textarea.select_all();
+                        app.textarea.cut();
+                    },
+                    Key::Up => app.scroll_up(),
+                    Key::Down => app.scroll_down(),
+                    Key::Char(_) if(app.get_textarea_count() < MAX_CHARS) => {
+                        app.textarea.input(input);
                     }
+                    Key::Left
+                    | Key::Right
+                    | Key::Backspace
+                    | Key::Delete
+                    | Key::Home
+                    | Key::End => {
+                        app.textarea.input(input);
+                    }
+                    _ => {}
                 }
             }
         }

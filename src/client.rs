@@ -1,6 +1,6 @@
 use std::{
     error::Error,
-    io::{self, Read, Write},
+    io::{ErrorKind, stdin, stdout},
     net::TcpStream,
     sync::{Arc, Mutex},
     thread,
@@ -22,6 +22,10 @@ use ratatui::{
     Frame
 };
 use tui_textarea::{Input, Key, TextArea};
+use chrono::Local;
+
+mod message;
+use message::{Message, receive_message, send_message, datetime_from_timestamp};
 
 const MAX_CHARS: usize = 128;
 
@@ -127,7 +131,6 @@ fn receive_messages(stream: &TcpStream, app: Arc<Mutex<App<'static>>>) -> Result
     stream_clone.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
 
     let join_handle = thread::spawn(move || {
-        let mut buf = [0u8; 128];
         loop {
             let running = {
                 let app = app.lock().unwrap();
@@ -138,32 +141,30 @@ fn receive_messages(stream: &TcpStream, app: Arc<Mutex<App<'static>>>) -> Result
                 break;
             }
 
-            match stream_clone.read(&mut buf) {
-                Ok(0) => {
+            match receive_message(&mut stream_clone) {
+                Ok(message) => {
                     let mut app = app.lock().unwrap();
-                    app.default_terminal_messages.push(String::from("[INFO]: Server closed connection"));
-                    app.running = false;
-                }
-                Ok(n) => {
-                    if let Ok(msg) = str::from_utf8(&buf[..n]) {
-                        let lines: Vec<String> = msg
-                            .lines()
-                            .map(|line| line.trim().to_string())
-                            .filter(|line| !line.is_empty())
-                            .collect();
-
-                        if !lines.is_empty() {
-                            let mut app = app.lock().unwrap();
-                            app.messages.extend(lines);
+                    match message {
+                        Message::ClientConnected { timestamp_secs, client_name } => {
+                            let datetime = datetime_from_timestamp(timestamp_secs);
+                            app.messages.push(format!("{datetime} '{client_name}' connected"));
+                        }
+                        Message::ClientDisconnected { timestamp_secs, client_name, reason } => {
+                            let datetime = datetime_from_timestamp(timestamp_secs);
+                            app.messages.push(format!("{datetime} '{client_name}' disconnected (reason: {reason})"));
+                        }
+                        Message::ClientMessage { timestamp_secs, client_name, msg } => {
+                            let datetime = datetime_from_timestamp(timestamp_secs);
+                            app.messages.push(format!("{datetime} {client_name}: {msg}"));
                         }
                     }
                 }
                 Err(ref err)
-                    if err.kind() == io::ErrorKind::WouldBlock ||
-                        err.kind() == io::ErrorKind::TimedOut => continue,
+                    if err.kind() == ErrorKind::WouldBlock ||
+                        err.kind() == ErrorKind::TimedOut => continue,
                 Err(err) => {
                     let mut app = app.lock().unwrap();
-                    app.default_terminal_messages.push(format!("[ERROR]: {err}"));
+                    app.default_terminal_messages.push(format!("[INFO]: Server closed connection: {err}"));
                     app.running = false;
                 }
             }
@@ -176,7 +177,7 @@ fn receive_messages(stream: &TcpStream, app: Arc<Mutex<App<'static>>>) -> Result
 fn main() -> Result<(), Box<dyn Error>> {
     println!("Enter the server address (ip:port):");
     let mut input_server_address = String::new();
-    io::stdin().read_line(&mut input_server_address).map_err(|err| {
+    stdin().read_line(&mut input_server_address).map_err(|err| {
         eprintln!("[ERROR]: Failed to read server address: {err}");
         err
     })?;
@@ -190,7 +191,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Connected");
     println!("Enter your name (4-20):");
     let mut input_name = String::new();
-    io::stdin().read_line(&mut input_name).map_err(|err| {
+    stdin().read_line(&mut input_name).map_err(|err| {
         eprintln!("[ERROR]: Failed to read name: {err}");
         err
     })?;
@@ -200,7 +201,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    stream.write(format!("{name}\n").as_bytes()).map_err(|err| {
+    let mut connect_message = Message::ClientConnected {
+        timestamp_secs: 0,
+        client_name: name.to_string()
+    };
+    send_message(&mut stream, &mut connect_message, false).map_err(|err| {
         eprintln!("[ERROR]: Failed to send your name to the server: {err}");
         err
     })?;
@@ -212,8 +217,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let join_handle = receive_messages(&stream, app.clone())?;
 
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(io::stdout());
+    execute!(stdout(), EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
     while app.lock().unwrap().running {
@@ -229,11 +234,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                     Key::Esc => app.running = false,
                     Key::Enter => {
                         let msg = app.textarea.lines().join("\n");
-                        if !msg.trim().is_empty() {
-                            if let Err(err) = stream.write_all(format!("{msg}\n").as_bytes()) {
-                                app.messages.push(format!("[ERROR]: Could not send messages: {err}"))
-                            } else {
-                                app.messages.push(format!("You: {msg}"));
+                        let msg_trimmed = msg.trim();
+                        if !msg_trimmed.is_empty() {
+                            let mut message = Message::ClientMessage {
+                                timestamp_secs: Local::now().timestamp(),
+                                client_name: name.to_string(),
+                                msg: msg_trimmed.to_string()
+                            };
+                            match send_message(&mut stream, &mut message, true) {
+                                Ok(_) => {
+                                    if let Message::ClientMessage { timestamp_secs, msg, .. } = message {
+                                        let datetime = datetime_from_timestamp(timestamp_secs);
+                                        app.messages.push(format!("{datetime} You: {msg}"));
+                                    }
+                                }
+                                Err(err) => app.messages.push(format!("[ERROR]: Failed to send message: {err}"))
                             }
                         }
                         app.textarea.select_all();
@@ -241,7 +256,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     },
                     Key::Up => app.scroll_up(),
                     Key::Down => app.scroll_down(),
-                    Key::Char(_) if(app.get_textarea_count() < MAX_CHARS) => {
+                    Key::Char(_) if app.get_textarea_count() < MAX_CHARS => {
                         app.textarea.input(input);
                     }
                     Key::Left

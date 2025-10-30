@@ -4,16 +4,21 @@ use mio::{
 };
 use std::{
     collections::HashMap,
-    io::{ Read, Write, ErrorKind },
+    io::ErrorKind,
     net::SocketAddr,
     error::Error
 };
+use chrono::Local;
+
+mod message;
+use message::{Message, try_receive_message, send_message, datetime_from_timestamp};
 
 const SERVER_PORT: usize = 6741;
 
 struct Client {
     stream: TcpStream,
     name: String,
+    buffer: Vec<u8>
 }
 
 struct Server {
@@ -28,37 +33,39 @@ impl Server {
     }
 
     fn client_incoming(&mut self, stream: TcpStream, addr: SocketAddr, token: Token) {
-        println!("[INFO]: Incoming connection from {}", addr); 
+        println!("[INFO]: Incoming connection from {addr}");
         self.clients.insert(token, Client {
             stream: stream,
-            name: "".to_string()
+            name: String::new(),
+            buffer: Vec::new()
         });
     }
 
-    fn client_broadcast(&mut self, sender_token: &Token, sender_msg: &str) {
-        let sender_name = self.clients[&sender_token].name.clone();
+    fn client_broadcast(&mut self, sender_token: &Token, timestamp_secs: i64, client_name: String, msg: String) {
+        println!("[INFO]: ({}) '{}' says: {}", datetime_from_timestamp(timestamp_secs), client_name, msg);
 
-        for line in sender_msg.split('\n') {
-            if !line.is_empty() {
-                println!("[INFO]: '{}' says: {}", sender_name, line);
+        let mut broadcast_msg = Message::ClientMessage {
+            timestamp_secs: timestamp_secs,
+            client_name: client_name,
+            msg: msg
+        };
 
-                let broadcast_msg = format!("{sender_name}: {line}\n");
-                let recipients: Vec<Token> = self.clients.keys().filter(|&&token| token != *sender_token).cloned().collect();
+        let recipients: Vec<Token> = self.clients
+            .keys()
+            .filter(|&&token| token != *sender_token)
+            .cloned()
+            .collect();
 
-                for other_token in recipients {
-                    if let Some(other_client) = self.clients.get_mut(&other_token) {
-                        let _ = other_client.stream.write(broadcast_msg.as_bytes());
-                    }
-                }
+        for other_token in recipients {
+            if let Some(other_client) = self.clients.get_mut(&other_token) {
+                let _ = send_message(&mut other_client.stream, &mut broadcast_msg, true);
             }
         }
     }
 
-    fn server_broadcast(&mut self, mut msg: String) {
-        msg.insert_str(0, "[SERVER]: ");
-        msg.push('\n');
+    fn server_broadcast(&mut self, mut msg: Message, reuse_timestamp: bool) {
         for (_, client) in &mut self.clients {
-            let _ = client.stream.write(msg.as_bytes());
+            let _ = send_message(&mut client.stream, &mut msg, reuse_timestamp);
         }
     }
 
@@ -70,60 +77,66 @@ impl Server {
                     Err(err) => eprintln!("[ERROR]: Failed to get address of the prematurely disconnected client: {err}")
                 }
             } else {
-                let disconn_msg;
-                if reason.is_empty() {
-                    disconn_msg = format!("'{}' disconnected", client.name);
-                } else {
-                    disconn_msg = format!("'{}' disconnceted (reason: {})", client.name, reason);
+                let disconn_msg = Message::ClientDisconnected {
+                    timestamp_secs: Local::now().timestamp(),
+                    client_name: client.name.clone(),
+                    reason: reason.to_string()
+                };
+                if let Message::ClientDisconnected { timestamp_secs, .. } = disconn_msg {
+                    println!("[INFO]: '{}' disconnected ({} reason: {})",
+                        client.name,
+                        datetime_from_timestamp(timestamp_secs),
+                        reason);
+                    self.server_broadcast(disconn_msg, true);
                 }
-                println!("[INFO]: {disconn_msg}");
-                self.server_broadcast(disconn_msg);
             }
         }
     }
 
-    fn client_connected(&mut self, token: &Token, msg: &str) {
-        if let Some(first_line) = msg.split('\n').next() {
-            let mut client_name = String::new();
-            if let Some(client) = self.clients.get_mut(token) {
-                client.name = first_line.to_string();
-                println!("[INFO]: '{}' connected", client.name);
-                client_name.push_str(&client.name);
-            }
-            self.server_broadcast(format!("'{}' connected", client_name));
+    fn client_connected(&mut self, token: &Token, timestamp_secs: i64, client_name: String) {
+        let mut client_name_clone = String::new();
+        if let Some(client) = self.clients.get_mut(token) {
+            client.name = client_name;
+            client_name_clone = client.name.clone();
         }
+        println!("[INFO]: '{}' connected ({})", client_name_clone, datetime_from_timestamp(timestamp_secs));
+        self.server_broadcast(Message::ClientConnected {
+            timestamp_secs: timestamp_secs,
+            client_name: client_name_clone
+        }, true);
     }
 
     fn client_read(&mut self, token: Token) {
-        let mut buf = [0u8; 128];
+        let mut read_ops: u32 = 0;
+        const READS_PER_TICK: u32 = 32;
 
-        let n = match self.clients.get_mut(&token) {
-            Some(client) => match client.stream.read(&mut buf) {
-                Ok(n) => n,
-                Err(err) => {
-                    if err.kind() != ErrorKind::WouldBlock {
+        loop {
+            read_ops += 1;
+            if read_ops > READS_PER_TICK {
+                break;
+            }
+            if let Some(client) = self.clients.get_mut(&token) {
+                let maybe_message = match try_receive_message(&mut client.stream, &mut client.buffer) {
+                    Ok(message_opt) => message_opt,
+                    Err(ref err) if err.kind() == ErrorKind::WouldBlock => break,
+                    Err(err) => {
                         self.client_disconnected(&token, &err.to_string());
+                        break;
                     }
-                    return;
+                };
+
+                if let Some(message) = maybe_message {
+                    match message {
+                        Message::ClientConnected { timestamp_secs, client_name } => {
+                            self.client_connected(&token, timestamp_secs, client_name);
+                        }
+                        Message::ClientMessage { timestamp_secs, client_name, msg } => {
+                            self.client_broadcast(&token, timestamp_secs, client_name, msg);
+                        }
+                        _ => {}
+                    }
                 }
             }
-            None => return
-        };
-
-        if n == 0 {
-            self.client_disconnected(&token, "");
-            return;
-        }
-
-        let msg = match str::from_utf8(&buf[..n]) {
-            Ok(m) => m,
-            Err(_) => return
-        };
-
-        if self.clients[&token].name.is_empty() {
-            self.client_connected(&token, msg);
-        } else {
-            self.client_broadcast(&token, msg);
         }
     }
 }

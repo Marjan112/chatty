@@ -16,5 +16,5 @@ bincode = "2.0.1"
 chrono = "0.4.42"
 crossterm = "0.29.0"
 mio = { version = "1", features = ["net", "os-poll"] }
-ratatui = "0.29.0"
+ratatui = { version = "0.29.0", features = ["unstable-rendered-line-info"] }
 tui-textarea = "0.7.0"

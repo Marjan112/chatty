@@ -1,110 +1,153 @@
 use std::{
     error::Error,
-    io::{ErrorKind, stdin, stdout},
+    io::{self, stdin},
     net::TcpStream,
-    sync::{Arc, Mutex},
+    sync::mpsc::{self, Receiver, Sender},
     thread,
-    time::{Duration, Instant}
+    time::{Duration, Instant},
 };
 use ratatui::{
-    prelude::*,
-    crossterm::{
-        event::{self, Event},
-        execute,
-        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-    },
-    backend::CrosstermBackend,
-    layout::{Layout, Constraint, Direction, Rect},
-    style::{Color, Style},
+    crossterm::event::{self, Event},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
-    Terminal,
-    Frame
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    DefaultTerminal,
+    Frame,
 };
+
 use tui_textarea::{Input, Key, TextArea};
-use chrono::Local;
-
 mod message;
-use message::{Message, receive_message, send_message, datetime_from_timestamp};
+use message::*;
 
-const MAX_CHARS: usize = 128;
+fn receive_messages(stream: &TcpStream, tx: Sender<String>) {
+    let mut stream_clone = stream.try_clone().unwrap();
+    let tx_clone = tx.clone();
+    thread::spawn(move || {
+        loop {
+            match receive_message(&mut stream_clone) {
+                Ok(message) => match message {
+                    Message::ClientConnected {timestamp_secs, client_name} => {
+                        let datetime = datetime_from_timestamp(timestamp_secs);
+                        let _ = tx_clone.send(format!("{datetime} '{client_name}' connected"));
+                    }
+                    Message::ClientDisconnected {timestamp_secs, client_name, reason} => {
+                        let datetime = datetime_from_timestamp(timestamp_secs);
+                        let _ = tx_clone.send(format!(
+                            "{datetime} '{client_name}' disconnected (reason: {reason})"
+                        ));
+                    }
+                    Message::ClientMessage {timestamp_secs, client_name, msg} => {
+                        let datetime = datetime_from_timestamp(timestamp_secs);
+                        let _ = tx_clone.send(format!("{datetime} {client_name}: {msg}"));
+                    }
+                },
+                Err(ref err)
+                    if err.kind() == io::ErrorKind::WouldBlock
+                        || err.kind() == io::ErrorKind::TimedOut => continue,
+                Err(err) => {
+                    if err.kind() == io::ErrorKind::UnexpectedEof {
+                        let _ = tx_clone.send(String::from("INFO: Server closed the connection"));
+                    } else {
+                        let _ = tx_clone.send(format!("ERROR: {err}"));
+                    }
+                    break;
+                }
+            }
+        }
+    });
+}
 
 struct App<'a> {
+    exit: bool,
+    input_box: TextArea<'a>,
     messages: Vec<String>,
-    default_terminal_messages: Vec<String>, // Naming - The unsolvable computer science problem
-    textarea: TextArea<'a>,
-    scroll_offset: usize,
-    visible_height: usize,
-    running: bool
+    vertical_scroll_state: ScrollbarState,
+    vertical_scroll: usize,
+    last_tick: Instant,
+    max_scroll: usize,
+    auto_scroll: bool,
 }
 
 impl<'a> App<'a> {
+    const TICK_RATE: Duration = Duration::from_millis(250);
+
     fn new() -> Self {
         Self {
-            messages: vec![
-                String::from("Welcome to ChaTTY!"),
-                String::from("Use UP/DOWN to scroll"),
-                String::from("Type and press Enter to send"),
-                String::from("Press ESC to exit")
-            ],
-            default_terminal_messages: Vec::new(),
-            textarea: TextArea::default(),
-            scroll_offset: 0,
-            visible_height: 0,
-            running: true
+            exit: false,
+            input_box: TextArea::default(),
+            messages: Vec::new(),
+            vertical_scroll_state: ScrollbarState::default(),
+            vertical_scroll: 0,
+            last_tick: Instant::now(),
+            max_scroll: 0,
+            auto_scroll: true,
         }
     }
 
-    fn get_textarea_count(&self) -> usize {
-        self.textarea
-            .lines()
-            .iter()
-            .map(|line| line.bytes().count())
-            .sum()
+    fn handle_events(&mut self, stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
+        let timeout = Self::TICK_RATE.saturating_sub(self.last_tick.elapsed());
+        if event::poll(timeout)? {
+            if let Event::Key(key) = event::read()? {
+                let input = Input::from(key);
+                match input.key {
+                    Key::Esc => self.exit = true,
+                    Key::Enter => {
+                        let line = self.input_box.lines().join("\n");
+                        let line_trimmed = line.trim();
+                        if !line_trimmed.is_empty() {
+                            let timestamp = chrono::Local::now().timestamp();
+                            let mut message = Message::ClientMessage {
+                                timestamp_secs: timestamp,
+                                client_name: String::new(),
+                                msg: line_trimmed.to_string(),
+                            };
+                            if let Err(err) = send_message(stream, &mut message, true) {
+                                self.messages.push(format!("ERROR: Failed to send message: {err}"))
+                            } else {
+                                let datetime = datetime_from_timestamp(timestamp);
+                                self.messages.push(format!("{datetime} You: {line_trimmed}"));
+                            }
+                        }
+                        self.input_box.select_all();
+                        self.input_box.cut();
+                    }
+                    Key::Up => self.vertical_scroll_up(),
+                    Key::Down => self.vertical_scroll_down(),
+                    _ => {
+                        self.input_box.input(input);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
-    fn draw_chat_window(&mut self, frame: &mut Frame, area: Rect) {
-        self.visible_height = (area.height as usize).saturating_sub(2);
+    fn run(&mut self, terminal: &mut DefaultTerminal, stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
+        let (tx, rx): (Sender<String>, Receiver<String>) = mpsc::channel();
+        receive_messages(stream, tx);
+        while !self.exit {
+            if let Ok(message) = rx.recv_timeout(Duration::default()) {
+                self.messages.push(message);
+            }
 
-        let height = area.height as usize - 2;
-        let total = self.messages.len();
+            terminal.draw(|frame| self.draw_ui(frame))?;
+            self.handle_events(stream)?;
 
-        let start = total.saturating_sub(height + self.scroll_offset);
-        let end = total.saturating_sub(self.scroll_offset);
-        let visible_msgs = &self.messages[start..end.min(total)];
-
-        let lines: Vec<Line> = visible_msgs
-            .iter()
-            .map(|msg| Line::from(Span::raw(msg)))
-            .collect();
-
-        let chat_box = Paragraph::new(lines)
-            .wrap(Wrap { trim: true })
-            .block(Block::default().title("ChaTTY").borders(Borders::ALL))
-            .style(Style::default().fg(Color::White));
-
-        frame.render_widget(chat_box, area);
-    }
-
-    fn draw_input_box(&mut self, frame: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" You: ({}/{}) ", self.get_textarea_count(), MAX_CHARS))
-            .fg(Color::Yellow);
-
-        self.textarea.set_block(block);
-        self.textarea.set_cursor_line_style(Style::default());
-        self.textarea.set_placeholder_text("Your message...");
-        frame.render_widget(&self.textarea, area);
+            if self.last_tick.elapsed() >= Self::TICK_RATE {
+                self.last_tick = Instant::now();
+            }
+        }
+        Ok(())
     }
 
     fn draw_ui(&mut self, frame: &mut Frame) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(3)
+            .constraints(
+                [Constraint::Percentage(90),
+                Constraint::Percentage(10)
             ])
             .split(frame.area());
 
@@ -112,180 +155,98 @@ impl<'a> App<'a> {
         self.draw_input_box(frame, chunks[1]);
     }
 
-    fn scroll_up(&mut self) {
-        let max_scroll = self.messages.len().saturating_sub(self.visible_height);
-        if self.scroll_offset < max_scroll {
-            self.scroll_offset += 1;
+    fn draw_chat_window(&mut self, frame: &mut Frame, chat_window_area: Rect) {
+        let lines: Vec<Line> = self
+            .messages
+            .iter()
+            .map(|msg| Line::from(Span::raw(msg)))
+            .collect();
+
+        let block = Block::default()
+            .title(" ChaTTY ".yellow())
+            .title_alignment(Alignment::Center)
+            .borders(Borders::ALL);
+
+        let chat = Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(block)
+            .scroll((self.vertical_scroll as u16, 0));
+
+        let line_count = chat.line_count(chat_window_area.width - 2);
+        let visible_lines = (chat_window_area.height) as usize;
+        self.max_scroll = line_count.saturating_sub(visible_lines);
+
+        if self.vertical_scroll > self.max_scroll || self.auto_scroll {
+            self.vertical_scroll = self.max_scroll;
         }
+        self.vertical_scroll_state = self.vertical_scroll_state
+            .content_length(self.max_scroll)
+            .position(self.vertical_scroll);
+
+        frame.render_widget(chat, chat_window_area);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight),
+            chat_window_area,
+            &mut self.vertical_scroll_state,
+        );
     }
 
-    fn scroll_down(&mut self) {
-        if self.scroll_offset > 0 {
-            self.scroll_offset -= 1;
+    fn draw_input_box(&mut self, frame: &mut Frame, input_box_area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" You: ".white())
+            .fg(Color::Yellow);
+
+        self.input_box.set_block(block);
+        self.input_box.set_cursor_line_style(Style::default());
+        self.input_box.set_placeholder_text("Your message...");
+
+        frame.render_widget(&self.input_box, input_box_area);
+    }
+
+    fn vertical_scroll_up(&mut self) {
+        self.vertical_scroll = self.vertical_scroll.saturating_sub(1);
+        self.vertical_scroll_state = self.vertical_scroll_state.position(self.vertical_scroll);
+        self.auto_scroll = false;
+    }
+
+    fn vertical_scroll_down(&mut self) {
+        self.vertical_scroll = self.vertical_scroll.saturating_add(1);
+        self.vertical_scroll_state = self.vertical_scroll_state.position(self.vertical_scroll);
+        if self.vertical_scroll >= self.max_scroll {
+            self.auto_scroll = true;
         }
     }
-}
-
-fn receive_messages(stream: &TcpStream, app: Arc<Mutex<App<'static>>>) -> Result<thread::JoinHandle<()>, Box<dyn Error>> {
-    let mut stream_clone = stream.try_clone()?;
-    stream_clone.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
-
-    let join_handle = thread::spawn(move || {
-        loop {
-            let running = {
-                let app = app.lock().unwrap();
-                app.running
-            };
-
-            if !running {
-                break;
-            }
-
-            match receive_message(&mut stream_clone) {
-                Ok(message) => {
-                    let mut app = app.lock().unwrap();
-                    match message {
-                        Message::ClientConnected { timestamp_secs, client_name } => {
-                            let datetime = datetime_from_timestamp(timestamp_secs);
-                            app.messages.push(format!("{datetime} '{client_name}' connected"));
-                        }
-                        Message::ClientDisconnected { timestamp_secs, client_name, reason } => {
-                            let datetime = datetime_from_timestamp(timestamp_secs);
-                            app.messages.push(format!("{datetime} '{client_name}' disconnected (reason: {reason})"));
-                        }
-                        Message::ClientMessage { timestamp_secs, client_name, msg } => {
-                            let datetime = datetime_from_timestamp(timestamp_secs);
-                            app.messages.push(format!("{datetime} {client_name}: {msg}"));
-                        }
-                    }
-                }
-                Err(ref err)
-                    if err.kind() == ErrorKind::WouldBlock ||
-                        err.kind() == ErrorKind::TimedOut => continue,
-                Err(err) => {
-                    let mut app = app.lock().unwrap();
-                    app.default_terminal_messages.push(format!("[INFO]: Server closed connection: {err}"));
-                    app.running = false;
-                }
-            }
-        }
-    });
-
-    Ok(join_handle)
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("Enter the server address (ip:port):");
-    let mut input_server_address = String::new();
-    stdin().read_line(&mut input_server_address).map_err(|err| {
-        eprintln!("[ERROR]: Failed to read server address: {err}");
+    println!("Enter the server address (ip:port)");
+    let mut server_address = String::new();
+    stdin().read_line(&mut server_address).unwrap();
+    let mut stream = TcpStream::connect(server_address.trim()).map_err(|err| {
+        eprintln!("ERROR: Failed to connect: {err}");
         err
     })?;
-    let server_address = input_server_address.trim();
-
-    let mut stream = TcpStream::connect(server_address).map_err(|err| {
-        eprintln!("[ERROR]: Failed to connect: {err}");
-        err
-    })?;
-
-    println!("Connected");
-    println!("Enter your name (4-20):");
-    let mut input_name = String::new();
-    stdin().read_line(&mut input_name).map_err(|err| {
-        eprintln!("[ERROR]: Failed to read name: {err}");
-        err
-    })?;
-    let name = input_name.trim();
-    if name.len() < 4 || name.len() > 20 {
-        eprintln!("[ERROR]: Invalid name length");
+    println!("Enter your name:");
+    let mut name = String::new();
+    stdin().read_line(&mut name).unwrap();
+    let name_trimmed = name.trim();
+    if name_trimmed.is_empty() {
+        eprintln!("ERROR: Cant have an empty name mate");
         return Ok(());
     }
 
     let mut connect_message = Message::ClientConnected {
         timestamp_secs: 0,
-        client_name: name.to_string()
+        client_name: name_trimmed.to_string(),
     };
     send_message(&mut stream, &mut connect_message, false).map_err(|err| {
-        eprintln!("[ERROR]: Failed to send your name to the server: {err}");
+        eprintln!("ERROR: Failed to send your name to the server: {err}");
         err
     })?;
 
-    let tick_rate = Duration::from_millis(200);
-    let mut last_tick = Instant::now();
-
-    let app: Arc<Mutex<App<'static>>> = Arc::new(Mutex::new(App::new()));
-    let join_handle = receive_messages(&stream, app.clone())?;
-
-    enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout());
-    let mut terminal = Terminal::new(backend)?;
-
-    while app.lock().unwrap().running {
-        terminal.draw(|frame| app.lock().unwrap().draw_ui(frame))?;
-
-        let timeout = tick_rate.checked_sub(last_tick.elapsed()).unwrap_or(Duration::from_secs(0));
-
-        if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                let mut app = app.lock().unwrap();
-                let input = Input::from(key);
-                match input.key {
-                    Key::Esc => app.running = false,
-                    Key::Enter => {
-                        let msg = app.textarea.lines().join("\n");
-                        let msg_trimmed = msg.trim();
-                        if !msg_trimmed.is_empty() {
-                            let mut message = Message::ClientMessage {
-                                timestamp_secs: Local::now().timestamp(),
-                                client_name: name.to_string(),
-                                msg: msg_trimmed.to_string()
-                            };
-                            match send_message(&mut stream, &mut message, true) {
-                                Ok(_) => {
-                                    if let Message::ClientMessage { timestamp_secs, msg, .. } = message {
-                                        let datetime = datetime_from_timestamp(timestamp_secs);
-                                        app.messages.push(format!("{datetime} You: {msg}"));
-                                    }
-                                }
-                                Err(err) => app.messages.push(format!("[ERROR]: Failed to send message: {err}"))
-                            }
-                        }
-                        app.textarea.select_all();
-                        app.textarea.cut();
-                    },
-                    Key::Up => app.scroll_up(),
-                    Key::Down => app.scroll_down(),
-                    Key::Char(_) if app.get_textarea_count() < MAX_CHARS => {
-                        app.textarea.input(input);
-                    }
-                    Key::Left
-                    | Key::Right
-                    | Key::Backspace
-                    | Key::Delete
-                    | Key::Home
-                    | Key::End => {
-                        app.textarea.input(input);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        if last_tick.elapsed() >= tick_rate {
-            last_tick = Instant::now();
-        }
-    }
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
-    for msg in &app.lock().unwrap().default_terminal_messages {
-        println!("{msg}");
-    }
-
-    join_handle.join().unwrap();
-
-    Ok(())
+    let mut terminal = ratatui::init();
+    let app_result = App::new().run(&mut terminal, &mut stream);
+    ratatui::restore();
+    app_result
 }

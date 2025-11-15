@@ -41,24 +41,27 @@ impl Server {
         });
     }
 
-    fn client_broadcast(&mut self, sender_token: &Token, timestamp_secs: i64, client_name: String, msg: String) {
-        println!("[INFO]: ({}) '{}' says: {}", datetime_from_timestamp(timestamp_secs), client_name, msg);
+    fn client_broadcast(&mut self, sender_token: &Token, timestamp_secs: i64, msg: String) {
+        if let Some(client) = self.clients.get(sender_token) {
+            let client_name = client.name.clone();
+            println!("[INFO]: ({}) '{}' says: {}", datetime_from_timestamp(timestamp_secs), client_name, msg);
 
-        let mut broadcast_msg = Message::ClientMessage {
-            timestamp_secs: timestamp_secs,
-            client_name: client_name,
-            msg: msg
-        };
+            let mut broadcast_msg = Message::ClientMessage {
+                timestamp_secs: timestamp_secs,
+                client_name: client_name,
+                msg: msg
+            };
 
-        let recipients: Vec<Token> = self.clients
-            .keys()
-            .filter(|&&token| token != *sender_token)
-            .cloned()
-            .collect();
+            let recipients: Vec<Token> = self.clients
+                .keys()
+                .filter(|&&token| token != *sender_token)
+                .cloned()
+                .collect();
 
-        for other_token in recipients {
-            if let Some(other_client) = self.clients.get_mut(&other_token) {
-                let _ = send_message(&mut other_client.stream, &mut broadcast_msg, true);
+            for other_token in recipients {
+                if let Some(other_client) = self.clients.get_mut(&other_token) {
+                    let _ = send_message(&mut other_client.stream, &mut broadcast_msg, true);
+                }
             }
         }
     }
@@ -130,8 +133,8 @@ impl Server {
                         Message::ClientConnected { timestamp_secs, client_name } => {
                             self.client_connected(&token, timestamp_secs, client_name);
                         }
-                        Message::ClientMessage { timestamp_secs, client_name, msg } => {
-                            self.client_broadcast(&token, timestamp_secs, client_name, msg);
+                        Message::ClientMessage { timestamp_secs, msg, .. } => {
+                            self.client_broadcast(&token, timestamp_secs, msg);
                         }
                         _ => {}
                     }

@@ -22,13 +22,15 @@ struct Client {
 }
 
 struct Server {
-    clients: HashMap<Token, Client>
+    clients: HashMap<Token, Client>,
+    messages: Vec<Message>,
 }
 
 impl Server {
     fn new() -> Self {
         Self {
-            clients: HashMap::new()
+            clients: HashMap::new(),
+            messages: Vec::new(),
         }
     }
 
@@ -63,6 +65,8 @@ impl Server {
                     let _ = send_message(&mut other_client.stream, &mut broadcast_msg, true);
                 }
             }
+
+            self.messages.push(broadcast_msg);
         }
     }
 
@@ -70,6 +74,7 @@ impl Server {
         for (_, client) in &mut self.clients {
             let _ = send_message(&mut client.stream, &mut msg, reuse_timestamp);
         }
+        self.messages.push(msg);
     }
 
     fn client_disconnected(&mut self, token: &Token, reason: &str) {
@@ -97,16 +102,20 @@ impl Server {
     }
 
     fn client_connected(&mut self, token: &Token, timestamp_secs: i64, client_name: String) {
-        let mut client_name_clone = String::new();
         if let Some(client) = self.clients.get_mut(token) {
-            client.name = client_name;
-            client_name_clone = client.name.clone();
+            client.name = client_name.clone();
+
+            println!("[INFO]: '{}' connected ({})", client.name, datetime_from_timestamp(timestamp_secs));
+
+            for msg in &mut self.messages {
+                let _ = send_message(&mut client.stream, msg, true);
+            }
+
+            self.server_broadcast(Message::ClientConnected {
+                timestamp_secs: timestamp_secs,
+                client_name: client_name
+            }, true);
         }
-        println!("[INFO]: '{}' connected ({})", client_name_clone, datetime_from_timestamp(timestamp_secs));
-        self.server_broadcast(Message::ClientConnected {
-            timestamp_secs: timestamp_secs,
-            client_name: client_name_clone
-        }, true);
     }
 
     fn client_read(&mut self, token: Token) {

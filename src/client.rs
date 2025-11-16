@@ -76,7 +76,12 @@ impl<'a> App<'a> {
         Self {
             exit: false,
             input_box: TextArea::default(),
-            messages: Vec::new(),
+            messages: vec![
+                String::from("Welcome to ChaTTY!"),
+                String::from("Use UP/DOWN to scroll"),
+                String::from("Type and press Enter to send"),
+                String::from("Press ESC to exit")
+            ],
             vertical_scroll_state: ScrollbarState::default(),
             vertical_scroll: 0,
             last_tick: Instant::now(),

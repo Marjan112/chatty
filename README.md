@@ -2,17 +2,23 @@
 
 Chat app in the terminal
 
-# Quick start
-    $ cargo build
+## Quick start
 
-## Server
+### Server
+
 > [!WARNING]
 > The server only works on linux for now.
 
-    $ cargo run --bin server
+```sh
+cargo run --bin server
+```
 
-## Client
-    $ cargo run --bin client
+### Client
 
-# License
+```sh
+cargo run --bin client
+```
+
+## License
+
 Licensed under the MIT License, see the [LICENSE](./LICENSE) file.

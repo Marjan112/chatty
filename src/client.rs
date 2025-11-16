@@ -2,7 +2,7 @@ use std::{
     error::Error,
     io::{self, stdin},
     net::TcpStream,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -20,36 +20,37 @@ use tui_textarea::{Input, Key, TextArea};
 mod message;
 use message::*;
 
-fn receive_messages(stream: &TcpStream, tx: Sender<String>) {
+fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<String>>>) {
     let mut stream_clone = stream.try_clone().unwrap();
-    let tx_clone = tx.clone();
     thread::spawn(move || {
         loop {
             match receive_message(&mut stream_clone) {
-                Ok(message) => match message {
-                    Message::ClientConnected {timestamp_secs, client_name} => {
-                        let datetime = datetime_from_timestamp(timestamp_secs);
-                        let _ = tx_clone.send(format!("{datetime} '{client_name}' connected"));
-                    }
-                    Message::ClientDisconnected {timestamp_secs, client_name, reason} => {
-                        let datetime = datetime_from_timestamp(timestamp_secs);
-                        let _ = tx_clone.send(format!(
-                            "{datetime} '{client_name}' disconnected (reason: {reason})"
-                        ));
-                    }
-                    Message::ClientMessage {timestamp_secs, client_name, msg} => {
-                        let datetime = datetime_from_timestamp(timestamp_secs);
-                        let _ = tx_clone.send(format!("{datetime} {client_name}: {msg}"));
+                Ok(message) => {
+                    let mut messages = messages.lock().unwrap();
+                    match message {
+                        Message::ClientConnected {timestamp_secs, client_name} => {
+                            let datetime = datetime_from_timestamp(timestamp_secs);
+                            messages.push(format!("{datetime} '{client_name}' connected"));
+                        }
+                        Message::ClientDisconnected {timestamp_secs, client_name, reason} => {
+                            let datetime = datetime_from_timestamp(timestamp_secs);
+                            messages.push(format!("{datetime} '{client_name}' disconnected (reason: {reason})"));
+                        }
+                        Message::ClientMessage {timestamp_secs, client_name, msg} => {
+                            let datetime = datetime_from_timestamp(timestamp_secs);
+                            messages.push(format!("{datetime} {client_name}: {msg}"));
+                        }
                     }
                 },
                 Err(ref err)
                     if err.kind() == io::ErrorKind::WouldBlock
                         || err.kind() == io::ErrorKind::TimedOut => continue,
                 Err(err) => {
+                    let mut messages = messages.lock().unwrap();
                     if err.kind() == io::ErrorKind::UnexpectedEof {
-                        let _ = tx_clone.send(String::from("INFO: Server closed the connection"));
+                        messages.push(String::from("INFO: Server closed the connection"));
                     } else {
-                        let _ = tx_clone.send(format!("ERROR: {err}"));
+                        messages.push(format!("ERROR: {err}"));
                     }
                     break;
                 }
@@ -61,7 +62,7 @@ fn receive_messages(stream: &TcpStream, tx: Sender<String>) {
 struct App<'a> {
     exit: bool,
     input_box: TextArea<'a>,
-    messages: Vec<String>,
+    messages: Arc<Mutex<Vec<String>>>,
     vertical_scroll_state: ScrollbarState,
     vertical_scroll: usize,
     last_tick: Instant,
@@ -76,12 +77,14 @@ impl<'a> App<'a> {
         Self {
             exit: false,
             input_box: TextArea::default(),
-            messages: vec![
-                String::from("Welcome to ChaTTY!"),
-                String::from("Use UP/DOWN to scroll"),
-                String::from("Type and press Enter to send"),
-                String::from("Press ESC to exit")
-            ],
+            messages: Arc::new(Mutex::new(
+                vec![
+                    String::from("Welcome to ChaTTY!"),
+                    String::from("Use UP/DOWN to scroll"),
+                    String::from("Type and press Enter to send"),
+                    String::from("Press ESC to exit")
+                ]
+            )),
             vertical_scroll_state: ScrollbarState::default(),
             vertical_scroll: 0,
             last_tick: Instant::now(),
@@ -98,6 +101,7 @@ impl<'a> App<'a> {
                 match input.key {
                     Key::Esc => self.exit = true,
                     Key::Enter => {
+                        let mut messages = self.messages.lock().unwrap();
                         let line = self.input_box.lines().join("\n");
                         let line_trimmed = line.trim();
                         if !line_trimmed.is_empty() {
@@ -108,10 +112,10 @@ impl<'a> App<'a> {
                                 msg: line_trimmed.to_string(),
                             };
                             if let Err(err) = send_message(stream, &mut message, true) {
-                                self.messages.push(format!("ERROR: Failed to send message: {err}"))
+                                messages.push(format!("ERROR: Failed to send message: {err}"))
                             } else {
                                 let datetime = datetime_from_timestamp(timestamp);
-                                self.messages.push(format!("{datetime} You: {line_trimmed}"));
+                                messages.push(format!("{datetime} You: {line_trimmed}"));
                             }
                         }
                         self.input_box.select_all();
@@ -129,13 +133,9 @@ impl<'a> App<'a> {
     }
 
     fn run(&mut self, terminal: &mut DefaultTerminal, stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
-        let (tx, rx): (Sender<String>, Receiver<String>) = mpsc::channel();
-        receive_messages(stream, tx);
-        while !self.exit {
-            if let Ok(message) = rx.recv_timeout(Duration::default()) {
-                self.messages.push(message);
-            }
+        receive_messages(stream, self.messages.clone());
 
+        while !self.exit {
             terminal.draw(|frame| self.draw_ui(frame))?;
             self.handle_events(stream)?;
 
@@ -161,8 +161,9 @@ impl<'a> App<'a> {
     }
 
     fn draw_chat_window(&mut self, frame: &mut Frame, chat_window_area: Rect) {
-        let lines: Vec<Line> = self
-            .messages
+        let messages = self.messages.lock().unwrap();
+
+        let lines: Vec<Line> = messages
             .iter()
             .map(|msg| Line::from(Span::raw(msg)))
             .collect();

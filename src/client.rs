@@ -150,9 +150,9 @@ impl<'a> App<'a> {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
-            .constraints(
-                [Constraint::Percentage(90),
-                Constraint::Percentage(10)
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(3)
             ])
             .split(frame.area());
 

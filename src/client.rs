@@ -15,8 +15,8 @@ use ratatui::{
     DefaultTerminal,
     Frame,
 };
-
 use tui_textarea::{Input, Key, TextArea};
+
 mod message;
 use message::*;
 

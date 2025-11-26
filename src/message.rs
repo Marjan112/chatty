@@ -4,8 +4,6 @@ use std::io::{Error, ErrorKind, Read, Write};
 use chrono::{format::{DelayedFormat, StrftimeItems}, Local, TimeZone};
 use bincode::{Decode, Encode};
 
-const CLIENT_MAGIC_NUMBER: u64 = 1415669827;
-
 #[derive(Encode, Decode)]
 pub enum Message {
     Handshake {

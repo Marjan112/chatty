@@ -6,9 +6,6 @@ use bincode::{Decode, Encode};
 
 #[derive(Encode, Decode)]
 pub enum Message {
-    Handshake {
-        magic: u64
-    },
     ClientConnected {
         timestamp_secs: i64,
         client_name: String
@@ -40,7 +37,6 @@ pub fn send_message<T: Write>(stream: &mut T, message: &mut Message, reuse_times
             Message::ClientConnected { timestamp_secs, .. }
             | Message::ClientDisconnected { timestamp_secs, .. }
             | Message::ClientMessage { timestamp_secs, ..} => *timestamp_secs = chrono::Local::now().timestamp(),
-            _ => {}
         };
     }
 

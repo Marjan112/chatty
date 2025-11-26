@@ -4,8 +4,8 @@ use mio::{
 };
 use std::{
     collections::HashMap,
-    io::ErrorKind,
-    net::SocketAddr,
+    io::{ErrorKind, Read},
+    net::{SocketAddr, Shutdown},
     error::Error
 };
 use chrono::Local;
@@ -139,13 +139,6 @@ impl Server {
 
                 if let Some(message) = maybe_message {
                     match message {
-                        Message::Handshake { magic } => {
-                            // This magic number 1415669827 is array ['C', 'h', 'a', 'T', 'T', 'Y', 0, 0] interpreted as a number
-                            if magic != 1415669827 {
-                                self.client_disconnected(&token, "Invalid client");
-                                return;
-                            }
-                        }
                         Message::ClientConnected { timestamp_secs, client_name } => {
                             self.client_connected(&token, timestamp_secs, client_name);
                         }
@@ -163,27 +156,27 @@ impl Server {
 fn main() -> Result<(), Box<dyn Error>> {
     let address = format!("0.0.0.0:{SERVER_PORT}");
     let mut listener = TcpListener::bind(address.parse().unwrap()).map_err(|err| {
-        eprintln!("[ERROR]: Failed to bind {address}: {err}");
+        eprintln!("ERROR: Failed to bind {address}: {err}");
         err
     })?;
     let mut poll = Poll::new().map_err(|err| {
-        eprintln!("[ERROR]: Failed to create poll object: {err}");
+        eprintln!("ERROR: Failed to create poll object: {err}");
         err
     })?;
     let mut events = Events::with_capacity(1024);
     let mut counter = 0;
 
     poll.registry().register(&mut listener, Token(counter), Interest::READABLE).map_err(|err| {
-        eprintln!("[ERROR]: Failed to register listener in poll object: {err}");
+        eprintln!("ERROR: Failed to register listener in poll object: {err}");
         err
     })?;
 
     let mut server = Server::new();
 
-    println!("[INFO]: Listening to {address}...");
+    println!("INFO: Listening to {address}...");
     loop {
         if let Err(err) = poll.poll(&mut events, None) {
-            eprintln!("[ERROR]: Failed to poll: {err}");
+            eprintln!("ERROR: Failed to poll: {err}");
             continue;
         }
         for token in events.iter().map(|ev| ev.token()) {
@@ -193,12 +186,26 @@ fn main() -> Result<(), Box<dyn Error>> {
                         counter += 1;
                         let client_token = Token(counter);
                         match poll.registry().register(&mut stream, client_token, Interest::READABLE) {
-                            Ok(_) => server.client_incoming(stream, addr, client_token),
-                            Err(err) => eprintln!("[ERROR]: Failed to register client in the poll object: {err}")
+                            Ok(_) => {
+                                let mut magic_buf = [0u8; 8];
+                                let _ = stream.read_exact(&mut magic_buf);
+
+                                let magic = u64::from_le_bytes(magic_buf);
+                                // This magic number 1415669827 is array
+                                // ['C', 'h', 'a', 'T', 'T', 'Y', 0, 0] interpreted as a number
+                                if magic != 1415669827 {
+                                    println!("INFO: Invalid client {addr} tried to connect");
+                                    let _ = stream.shutdown(Shutdown::Both);
+                                    continue;
+                                }
+
+                                server.client_incoming(stream, addr, client_token)
+                            },
+                            Err(err) => eprintln!("ERROR: Failed to register client in the poll object: {err}")
                         }
                     }
                     Err(err) if err.kind() != ErrorKind::WouldBlock => {
-                        eprintln!("[ERROR]: Failed to accept client: {err}");
+                        eprintln!("ERROR: Failed to accept client: {err}");
                     }
                     Err(_) => {}
                 },

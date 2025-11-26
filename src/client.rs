@@ -1,6 +1,6 @@
 use std::{
     error::Error,
-    io::{self, stdin},
+    io::{self, stdin, Write},
     net::TcpStream,
     sync::{Arc, Mutex},
     thread,
@@ -40,7 +40,6 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<String>>>) {
                             let datetime = datetime_from_timestamp(timestamp_secs);
                             messages.push(format!("{datetime} {client_name}: {msg}"));
                         }
-                        _ => {}
                     }
                 },
                 Err(ref err)
@@ -235,12 +234,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         err
     })?;
 
-    let mut handshake_message = Message::Handshake {
-        // This magic number 1415669827 is array ['C', 'h', 'a', 'T', 'T', 'Y', 0, 0] interpreted as a number
-        magic: 1415669827
-    };
-    send_message(&mut stream, &mut handshake_message, false).map_err(|err| {
-        eprintln!("Failed to perform a handshake: {err}");
+    // This magic number 1415669827 is array ['C', 'h', 'a', 'T', 'T', 'Y', 0, 0] interpreted as a number
+    let magic: u64 = 1415669827;
+    stream.write(&magic.to_le_bytes()).map_err(|err| {
+        eprintln!("ERROR: Failed to perform a handshake: {err}");
         err
     })?;
 

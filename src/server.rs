@@ -139,6 +139,13 @@ impl Server {
 
                 if let Some(message) = maybe_message {
                     match message {
+                        Message::Handshake { magic } => {
+                            // This magic number 1415669827 is array ['C', 'h', 'a', 'T', 'T', 'Y', 0, 0] interpreted as a number
+                            if magic != 1415669827 {
+                                self.client_disconnected(&token, "Invalid client");
+                                return;
+                            }
+                        }
                         Message::ClientConnected { timestamp_secs, client_name } => {
                             self.client_connected(&token, timestamp_secs, client_name);
                         }

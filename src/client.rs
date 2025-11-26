@@ -40,6 +40,7 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<String>>>) {
                             let datetime = datetime_from_timestamp(timestamp_secs);
                             messages.push(format!("{datetime} {client_name}: {msg}"));
                         }
+                        _ => {}
                     }
                 },
                 Err(ref err)
@@ -233,6 +234,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("ERROR: Failed to connect: {err}");
         err
     })?;
+
+    let mut handshake_message = Message::Handshake {
+        // This magic number 1415669827 is array ['C', 'h', 'a', 'T', 'T', 'Y', 0, 0] interpreted as a number
+        magic: 1415669827
+    };
+    send_message(&mut stream, &mut handshake_message, false).map_err(|err| {
+        eprintln!("Failed to perform a handshake: {err}");
+        err
+    })?;
+
     println!("Enter your name:");
     let mut name = String::new();
     stdin().read_line(&mut name).unwrap();

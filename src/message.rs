@@ -2,10 +2,15 @@
 
 use std::io::{Error, ErrorKind, Read, Write};
 use chrono::{format::{DelayedFormat, StrftimeItems}, Local, TimeZone};
-use bincode::{Decode, Encode };
+use bincode::{Decode, Encode};
+
+const CLIENT_MAGIC_NUMBER: u64 = 1415669827;
 
 #[derive(Encode, Decode)]
 pub enum Message {
+    Handshake {
+        magic: u64
+    },
     ClientConnected {
         timestamp_secs: i64,
         client_name: String
@@ -36,7 +41,8 @@ pub fn send_message<T: Write>(stream: &mut T, message: &mut Message, reuse_times
         match message {
             Message::ClientConnected { timestamp_secs, .. }
             | Message::ClientDisconnected { timestamp_secs, .. }
-            | Message::ClientMessage { timestamp_secs, ..} => *timestamp_secs = chrono::Local::now().timestamp()
+            | Message::ClientMessage { timestamp_secs, ..} => *timestamp_secs = chrono::Local::now().timestamp(),
+            _ => {}
         };
     }
 

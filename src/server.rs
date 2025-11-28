@@ -199,7 +199,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     continue;
                                 }
 
-                                server.client_incoming(stream, addr, client_token)
+                                server.client_incoming(stream, addr, client_token);
                             },
                             Err(err) => eprintln!("ERROR: Failed to register client in the poll object: {err}")
                         }

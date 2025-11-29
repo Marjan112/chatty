@@ -236,7 +236,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // This magic number 1415669827 is array ['C', 'h', 'a', 'T', 'T', 'Y', 0, 0] interpreted as a number
     let magic: u64 = 1415669827;
-    stream.write(&magic.to_le_bytes()).map_err(|err| {
+    stream.write_all(&magic.to_le_bytes()).map_err(|err| {
         eprintln!("ERROR: Failed to perform a handshake: {err}");
         err
     })?;

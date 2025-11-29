@@ -47,10 +47,11 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<String>>>) {
                         || err.kind() == io::ErrorKind::TimedOut => continue,
                 Err(err) => {
                     let mut messages = messages.lock().unwrap();
-                    if err.kind() == io::ErrorKind::UnexpectedEof {
-                        messages.push(String::from("INFO: Server closed the connection"));
-                    } else {
-                        messages.push(format!("ERROR: {err}"));
+                    match err.kind() {
+                        io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset => {
+                            messages.push(format!("INFO: Server closed the connection"));
+                        }
+                        _ => messages.push(format!("ERROR: {err}"))
                     }
                     break;
                 }

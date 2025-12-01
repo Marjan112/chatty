@@ -4,7 +4,7 @@ use mio::{
 };
 use std::{
     collections::HashMap,
-    io::{ErrorKind, Read},
+    io::{ErrorKind, Read, Write},
     net::{SocketAddr, Shutdown},
     error::Error
 };
@@ -187,15 +187,27 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let client_token = Token(counter);
                         match poll.registry().register(&mut stream, client_token, Interest::READABLE) {
                             Ok(_) => {
-                                let mut magic_buf = [0u8; 8];
-                                let _ = stream.read_exact(&mut magic_buf);
+                                let expected_magic = *b"ChaTTY\0\0";
 
-                                let magic = u64::from_le_bytes(magic_buf);
-                                // This magic number 1415669827 is array
-                                // ['C', 'h', 'a', 'T', 'T', 'Y', 0, 0] interpreted as a number
-                                if magic != 1415669827 {
+                                let mut magic_buf = [0u8; 8];
+                                if let Err(err) = stream.read_exact(&mut magic_buf) {
+                                    eprintln!("ERROR: Handshake with client {addr} failed: {err}");
+                                    continue;
+                                }
+
+                                if magic_buf != expected_magic {
                                     println!("INFO: Invalid client {addr} tried to connect");
                                     let _ = stream.shutdown(Shutdown::Both);
+                                    continue;
+                                }
+
+                                if let Err(err) = stream.write_all(&mut magic_buf) {
+                                    eprintln!("ERROR: Handshake with client {addr} failed: {err}");
+                                    continue;
+                                }
+
+                                if let Err(err) = stream.peer_addr() {
+                                    eprintln!("ERROR: Handshake with client {addr} failed: {err}");
                                     continue;
                                 }
 

@@ -1,10 +1,11 @@
 use std::{
     error::Error,
-    io::{self, stdin, Write},
-    net::TcpStream,
+    io::{self, stdin, Read, Write},
+    net::{TcpStream, ToSocketAddrs},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
+    fmt
 };
 use ratatui::{
     crossterm::event::{self, Event},
@@ -226,21 +227,98 @@ impl<'a> App<'a> {
     }
 }
 
+#[derive(Debug)]
+enum HandshakeError {
+    IO(io::Error),
+    Timeout,
+    InvalidMagic
+}
+
+impl fmt::Display for HandshakeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HandshakeError::IO(err) => write!(f, "{err}"),
+            HandshakeError::Timeout => write!(f, "timeout expired"),
+            HandshakeError::InvalidMagic => write!(f, "server returned invalid magic bytes")
+        }
+    }
+}
+
+impl From<io::Error> for HandshakeError {
+    fn from(err: io::Error) -> Self {
+        HandshakeError::IO(err)
+    }
+}
+
+impl Error for HandshakeError {}
+
+fn init_handshake(stream: &mut TcpStream) -> Result<(), HandshakeError> {
+    println!("INFO: Initializing handshake...");
+
+    stream.write_all(b"ChaTTY\0\0").map_err(|err| {
+        match err.kind() {
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
+                eprintln!("ERROR: Handshake failed: Timeout expired");
+                HandshakeError::Timeout
+            }
+            _ => {
+                eprintln!("ERROR: Handshake failed: {err}");
+                HandshakeError::IO(err)
+            }
+        }
+    })?;
+
+    let mut server_magic_buf = [0u8; 8];
+    stream.read_exact(&mut server_magic_buf).map_err(|err| {
+        match err.kind() {
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
+                eprintln!("ERROR: Handshake failed: Timeout expired");
+                HandshakeError::Timeout
+            }
+            _ => {
+                eprintln!("ERROR: Handshake failed: {err}");
+                HandshakeError::IO(err)
+            }
+        }
+    })?;
+
+    if server_magic_buf != *b"ChaTTY\0\0" {
+        eprintln!("ERROR: Handshake failed: Not a ChaTTY server");
+        return Err(HandshakeError::InvalidMagic);
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     println!("Enter the server address (ip:port)");
     let mut server_address = String::new();
     stdin().read_line(&mut server_address).unwrap();
-    let mut stream = TcpStream::connect(server_address.trim()).map_err(|err| {
+
+    let server_address_trimmed = server_address.trim();
+
+    let server_sock_addr = server_address_trimmed.to_socket_addrs().map_err(|err| {
+        eprintln!("ERROR: Failed to resolve address {server_address_trimmed}");
+        err
+    })?.find(|a| a.is_ipv4()).unwrap();
+
+    let mut stream = TcpStream::connect_timeout(&server_sock_addr, Duration::from_secs(5)).map_err(|err| {
         eprintln!("ERROR: Failed to connect: {err}");
         err
     })?;
 
-    // This magic number 1415669827 is array ['C', 'h', 'a', 'T', 'T', 'Y', 0, 0] interpreted as a number
-    let magic: u64 = 1415669827;
-    stream.write_all(&magic.to_le_bytes()).map_err(|err| {
-        eprintln!("ERROR: Failed to perform a handshake: {err}");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).map_err(|err| {
+        eprintln!("ERROR: Failed to set read timeout: {err}");
         err
     })?;
+    stream.set_write_timeout(Some(Duration::from_secs(5))).map_err(|err| {
+        eprintln!("ERROR: Failed to set write timeout: {err}");
+        err
+    })?;
+
+    println!("INFO: Connected to {server_sock_addr}");
+
+    init_handshake(&mut stream)?;
 
     println!("Enter your name:");
     let mut name = String::new();

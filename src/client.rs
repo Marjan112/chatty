@@ -302,16 +302,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         err
     })?.find(|a| a.is_ipv4()).unwrap();
 
-    let mut stream = TcpStream::connect_timeout(&server_sock_addr, Duration::from_secs(5)).map_err(|err| {
+    let mut stream = TcpStream::connect_timeout(&server_sock_addr, Duration::from_secs(20)).map_err(|err| {
         eprintln!("ERROR: Failed to connect: {err}");
         err
     })?;
 
-    stream.set_read_timeout(Some(Duration::from_secs(5))).map_err(|err| {
+    stream.set_read_timeout(Some(Duration::from_secs(20))).map_err(|err| {
         eprintln!("ERROR: Failed to set read timeout: {err}");
         err
     })?;
-    stream.set_write_timeout(Some(Duration::from_secs(5))).map_err(|err| {
+    stream.set_write_timeout(Some(Duration::from_secs(20))).map_err(|err| {
         eprintln!("ERROR: Failed to set write timeout: {err}");
         err
     })?;

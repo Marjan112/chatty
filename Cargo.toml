@@ -1,6 +1,6 @@
 [package]
 name = "chatty"
-version = "3.1.0-alpha"
+version = "3.1.0-alpha.1"
 edition = "2024"
 
 [[bin]]
@@ -18,3 +18,4 @@ crossterm = "0.29.0"
 mio = { version = "1", features = ["net", "os-poll"] }
 ratatui = { version = "0.29.0", features = ["unstable-rendered-line-info"] }
 tui-textarea = "0.7.0"
+self_update = "0.42.0"

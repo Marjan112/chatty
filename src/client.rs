@@ -290,7 +290,24 @@ fn init_handshake(stream: &mut TcpStream) -> Result<(), HandshakeError> {
     Ok(())
 }
 
+fn check_for_updates() -> Result<(), Box<dyn Error>> {
+    println!("INFO: Checking for updates...");
+
+    let status = self_update::backends::github::Update::configure()
+        .repo_owner("Marjan112")
+        .repo_name("chatty")
+        .bin_name("chatty_client")
+        .current_version(env!("CARGO_PKG_VERSION"))
+        .build()?
+        .update()?;
+
+    println!("{}", status.version());
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
+    check_for_updates().ok();
+
     println!("Enter the server address (ip:port)");
     let mut server_address = String::new();
     stdin().read_line(&mut server_address).unwrap();

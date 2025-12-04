@@ -2,15 +2,14 @@ name: Rust
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - 'v*'
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
-
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -18,12 +17,42 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    
-    - name: Build
-      run: cargo build --release --verbose
 
-    - name: Upload binaries
-      uses: actions/upload-artifact@v4
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
       with:
-        name: chatty_client-${{ matrix.os }}
-        path: target/release/client*
+        toolchain: stable
+        override: true
+
+    - name: Set target triple
+      id: target
+      run: |
+        if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+          echo "triple=x86_64-pc-windows-msvc" >> $GITHUB_OUTPUT
+        elif [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+          echo "triple=x86_64-unknown-linux-gnu" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build
+      run: cargo build --release --target ${{ steps.target.outputs.triple }}
+
+    - name: Create release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref_name }}
+        release_name: Release ${{ github.ref_name }}
+        draft: false
+        prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha')}}
+
+    - name: Upload release asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: target/${{ steps.target.outputs.triple }}/release/client*
+        asset_name: chatty_client-${{ matrix.os }}-${{ steps.target.outputs.triple }}
+        asset_content_type: application/octet-stream

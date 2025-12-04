@@ -1,3 +1,5 @@
+[![CI](https://github.com/Marjan112/chatty/actions/workflows/CI.yml/badge.svg)](https://github.com/Marjan112/chatty/actions/workflows/CI.yml)
+
 # ChaTTY
 
 Chat app in the terminal

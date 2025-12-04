@@ -1,0 +1,29 @@
+name: Rust
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Build
+      run: cargo build --release --verbose
+
+    - name: Upload binaries
+      uses: actions/upload-artifact@v4
+      with:
+        name: chatty_client-${{ matrix.os }}
+        path: target/release/client*

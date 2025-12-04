@@ -12,13 +12,13 @@ Chat app in the terminal
 > The server only works on linux for now.
 
 ```sh
-cargo run --bin server
+cargo run --bin chatty_server
 ```
 
 ### Client
 
 ```sh
-cargo run --bin client
+cargo run --bin chatty_client
 ```
 
 ## License

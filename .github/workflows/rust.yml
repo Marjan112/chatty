@@ -26,6 +26,7 @@ jobs:
 
     - name: Set target triple
       id: target
+      shell: bash
       run: |
         if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
           echo "triple=x86_64-pc-windows-msvc" >> $GITHUB_OUTPUT

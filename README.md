@@ -1,6 +1,7 @@
-[![CI](https://github.com/Marjan112/chatty/actions/workflows/CI.yml/badge.svg)](https://github.com/Marjan112/chatty/actions/workflows/CI.yml)
-
 # ChaTTY
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/Marjan112/chatty/actions/workflows/CI.yml/badge.svg)](https://github.com/Marjan112/chatty/actions/workflows/CI.yml)
 
 Chat app in the terminal
 

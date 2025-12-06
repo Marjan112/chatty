@@ -17,11 +17,38 @@ use ratatui::{
     Frame,
 };
 use tui_textarea::{Input, Key, TextArea};
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 
 mod message;
 use message::*;
 
-fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<String>>>) {
+const NAME_COLORS: &[Color] = &[
+    Color::Red,
+    Color::Green,
+    Color::Yellow,
+    Color::Blue,
+    Color::Magenta,
+    Color::Cyan,
+    Color::LightRed,
+    Color::LightGreen,
+    Color::LightYellow,
+    Color::LightBlue,
+    Color::LightMagenta,
+    Color::LightMagenta
+];
+
+fn color_index_from_name(name: &str) -> u8 {
+    let mut hasher = DefaultHasher::new();
+    name.to_lowercase().hash(&mut hasher);
+    let hash = hasher.finish();
+
+    let index = (hash as usize) % NAME_COLORS.len();
+
+    index as u8
+}
+
+fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>) {
     let mut stream_clone = stream.try_clone().unwrap();
     thread::spawn(move || {
         loop {
@@ -30,16 +57,37 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<String>>>) {
                     let mut messages = messages.lock().unwrap();
                     match message {
                         Message::ClientConnected {timestamp_secs, client_name} => {
-                            let datetime = datetime_from_timestamp(timestamp_secs);
-                            messages.push(format!("{datetime} '{client_name}' connected"));
+                            let datetime = datetime_from_timestamp(timestamp_secs).to_string();
+                            let client_name_color = NAME_COLORS[color_index_from_name(&client_name) as usize];
+                            // messages.push(format!("{datetime} '{client_name}' connected"));
+                            messages.push(Line::from(vec![
+                                datetime.into(),
+                                Span::from(" "),
+                                Span::styled(client_name, Style::default().fg(client_name_color)),
+                                Span::from(" connected"),
+                            ]));
                         }
                         Message::ClientDisconnected {timestamp_secs, client_name, reason} => {
-                            let datetime = datetime_from_timestamp(timestamp_secs);
-                            messages.push(format!("{datetime} '{client_name}' disconnected (reason: {reason})"));
+                            let datetime = datetime_from_timestamp(timestamp_secs).to_string();
+                            let client_name_color = NAME_COLORS[color_index_from_name(&client_name) as usize];
+                            // messages.push(format!("{datetime} '{client_name}' disconnected (reason: {reason})"));
+                            messages.push(Line::from(vec![
+                                datetime.into(),
+                                Span::from(" "),
+                                Span::styled(client_name, Style::default().fg(client_name_color)),
+                                format!(" disconnected (reason: {reason})").into()
+                            ]));
                         }
                         Message::ClientMessage {timestamp_secs, client_name, msg} => {
-                            let datetime = datetime_from_timestamp(timestamp_secs);
-                            messages.push(format!("{datetime} {client_name}: {msg}"));
+                            let datetime = datetime_from_timestamp(timestamp_secs).to_string();
+                            let client_name_color = NAME_COLORS[color_index_from_name(&client_name) as usize];
+                            // messages.push(format!("{datetime} {client_name}: {msg}"));
+                            messages.push(Line::from(vec![
+                                datetime.into(),
+                                Span::from(" "),
+                                Span::styled(client_name, Style::default().fg(client_name_color)),
+                                format!(": {msg}").into()
+                            ]));
                         }
                     }
                 },
@@ -50,9 +98,9 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<String>>>) {
                     let mut messages = messages.lock().unwrap();
                     match err.kind() {
                         io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset => {
-                            messages.push(format!("INFO: Server closed the connection"));
+                            messages.push(format!("INFO: Server closed the connection").into());
                         }
-                        _ => messages.push(format!("ERROR: {err}"))
+                        _ => messages.push(format!("ERROR: {err}").into())
                     }
                     break;
                 }
@@ -61,30 +109,49 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<String>>>) {
     });
 }
 
-struct App<'a> {
+struct App {
     exit: bool,
-    input_box: TextArea<'a>,
-    messages: Arc<Mutex<Vec<String>>>,
+    input_box: TextArea<'static>,
+    messages: Arc<Mutex<Vec<Line<'static>>>>,
     vertical_scroll_state: ScrollbarState,
     vertical_scroll: usize,
     last_tick: Instant,
     max_scroll: usize,
     auto_scroll: bool,
+    client_name: String
 }
 
-impl<'a> App<'a> {
+impl App {
     const TICK_RATE: Duration = Duration::from_millis(250);
 
-    fn new() -> Self {
+    fn new(client_name: &str) -> Self {
         Self {
             exit: false,
             input_box: TextArea::default(),
             messages: Arc::new(Mutex::new(
                 vec![
-                    String::from("Welcome to ChaTTY!"),
-                    String::from("Use UP/DOWN to scroll"),
-                    String::from("Type and press Enter to send"),
-                    String::from("Press ESC to exit")
+                    Line::from(vec![
+                        "Welcome to ".into(),
+                        "ChaTTY".yellow(),
+                        "!".into()
+                    ]),
+                    Line::from(vec![
+                        "Use ".into(),
+                        "UP".yellow(),
+                        "/".into(),
+                        "DOWN".yellow(),
+                        " to scroll".into()
+                    ]),
+                    Line::from(vec![
+                        "Type and press ".into(),
+                        "ENTER".yellow(),
+                        " to send".into()
+                    ]),
+                    Line::from(vec![
+                        "Press ".into(),
+                        "ESC".yellow(),
+                        " to exit".into()
+                    ])
                 ]
             )),
             vertical_scroll_state: ScrollbarState::default(),
@@ -92,6 +159,7 @@ impl<'a> App<'a> {
             last_tick: Instant::now(),
             max_scroll: 0,
             auto_scroll: true,
+            client_name: client_name.to_string()
         }
     }
 
@@ -114,10 +182,11 @@ impl<'a> App<'a> {
                                 msg: line_trimmed.to_string(),
                             };
                             if let Err(err) = send_message(stream, &mut message, true) {
-                                messages.push(format!("ERROR: Failed to send message: {err}"))
+                                messages.push(format!("ERROR: Failed to send message: {err}").into());
                             } else {
                                 let datetime = datetime_from_timestamp(timestamp);
-                                messages.push(format!("{datetime} You: {line_trimmed}"));
+                                let client_name = &self.client_name;
+                                messages.push(format!("{datetime} {client_name}: {line_trimmed}").into());
                             }
                         }
                         self.input_box.select_all();
@@ -165,17 +234,12 @@ impl<'a> App<'a> {
     fn draw_chat_window(&mut self, frame: &mut Frame, chat_window_area: Rect) {
         let messages = self.messages.lock().unwrap();
 
-        let lines: Vec<Line> = messages
-            .iter()
-            .map(|msg| Line::from(Span::raw(msg)))
-            .collect();
-
         let block = Block::default()
             .title(" ChaTTY ".yellow())
             .title_alignment(Alignment::Center)
             .borders(Borders::ALL);
 
-        let chat = Paragraph::new(lines)
+        let chat = Paragraph::new(messages.clone())
             .wrap(Wrap { trim: true })
             .block(block)
             .scroll((self.vertical_scroll as u16, 0));
@@ -356,7 +420,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
 
     let mut terminal = ratatui::init();
-    let app_result = App::new().run(&mut terminal, &mut stream);
+    let app_result = App::new(name_trimmed).run(&mut terminal, &mut stream);
     ratatui::restore();
     app_result
 }

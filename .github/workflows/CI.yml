@@ -28,12 +28,19 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         run: cargo build --bin chatty_client --release
 
+      - name: Rename binary with version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          $NEW_NAME="chatty_client-${{ github.ref_name }}-windows-amd64-msvc.exe"
+          Rename-Item "target/release/chatty_client.exe" $NEW_NAME
+        shell: pwsh
+
       - name: Release (create + upload)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
           name: ChaTTY - ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
-          files: target/release/chatty_client.exe
+          files: target/release/chatty_client-${{ github.ref_name }}-windows-amd64-msvc.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}

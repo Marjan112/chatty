@@ -90,18 +90,12 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>
                             ]));
                         }
                         Message::ClientList { client_names } => {
-                            let mut line_content = Vec::<Span>::new();
- 
                             messages.push(Line::from("Connected clients:"));
 
                             for client_name in client_names {
                                 let client_name_color = NAME_COLORS[color_index_from_name(&client_name) as usize];
-
-                                line_content.push(Span::from("- "));
-                                line_content.push(Span::styled(client_name, Style::default().fg(client_name_color)));
+                                messages.push(Line::styled(format!("- {client_name}"), Style::default().fg(client_name_color)));
                             }
-
-                            messages.push(Line::from(line_content));
                         }
                         _ => {}
                     }

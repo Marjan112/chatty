@@ -11,7 +11,7 @@ use std::{
 use chrono::Local;
 
 mod message;
-use message::{Message, try_receive_message, send_message, datetime_from_timestamp};
+use message::*;
 
 struct Client {
     stream: TcpStream,
@@ -75,7 +75,7 @@ impl Server {
             let _ = stream.shutdown(Shutdown::Both);
         };
 
-        const MAX_TRIES: i32 = 5;
+        const MAX_TRIES: i32 = 500;
 
         let expected_magic = *b"ChaTTY\0\0";
 
@@ -86,18 +86,18 @@ impl Server {
             match read_magic(stream, &mut magic_buf) {
                 Ok(_) => break,
                 Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
-                    println!("INFO: Handshake with client {addr} failed, trying again ({i})");
+                    // println!("INFO: Handshake with client {addr} failed, trying again ({i})");
 
                     if i >= MAX_TRIES {
-                        eprintln!("ERROR: Handshake with client {addr} failed: {err}");
+                        // eprintln!("ERROR: Handshake with client {addr} failed: {err}");
                         disconnect_by_stream(stream, addr);
                         return false;
                     }
 
                     continue;
                 }
-                Err(err) => {
-                    eprintln!("ERROR: Handshake with client {addr} failed: {err}");
+                Err(_err) => {
+                    // eprintln!("ERROR: Handshake with client {addr} failed: {err}");
                     disconnect_by_stream(stream, addr);
                     return false;
                 }
@@ -105,19 +105,19 @@ impl Server {
         }
 
         if magic_buf != expected_magic {
-            println!("INFO: Invalid client {addr} tried to connect");
+            // println!("INFO: Invalid client {addr} tried to connect");
             disconnect_by_stream(stream, addr);
             return false;
         }
 
-        if let Err(err) = stream.write_all(&mut magic_buf) {
-            eprintln!("ERROR: Handshake with client {addr} failed: {err}");
+        if let Err(_err) = stream.write_all(&mut magic_buf) {
+            // eprintln!("ERROR: Handshake with client {addr} failed: {err}");
             disconnect_by_stream(stream, addr);
             return false;
         }
 
-        if let Err(err) = stream.peer_addr() {
-            eprintln!("ERROR: Handshake with client {addr} failed: {err}");
+        if let Err(_err) = stream.peer_addr() {
+            // eprintln!("ERROR: Handshake with client {addr} failed: {err}");
             disconnect_by_stream(stream, addr);
             return false;
         }
@@ -191,7 +191,7 @@ impl Server {
 
             for other_token in recipients {
                 if let Some(other_client) = self.clients.get_mut(&other_token) {
-                    let _ = send_message(&mut other_client.stream, &mut broadcast_msg, true);
+                    let _ = send_message_with_timestamp(&mut other_client.stream, &mut broadcast_msg, true);
                 }
             }
 
@@ -201,7 +201,7 @@ impl Server {
 
     fn server_broadcast(&mut self, mut msg: Message, reuse_timestamp: bool) {
         for (_, client) in &mut self.clients {
-            let _ = send_message(&mut client.stream, &mut msg, reuse_timestamp);
+            let _ = send_message_with_timestamp(&mut client.stream, &mut msg, reuse_timestamp);
         }
         self.messages.push(msg);
     }
@@ -241,13 +241,25 @@ impl Server {
             println!("INFO: '{}' connected ({})", client.name, datetime_from_timestamp(timestamp_secs));
 
             for msg in &mut self.messages {
-                let _ = send_message(&mut client.stream, msg, true);
+                let _ = send_message_with_timestamp(&mut client.stream, msg, true);
             }
 
             self.server_broadcast(Message::ClientConnected {
                 timestamp_secs: timestamp_secs,
                 client_name: client_name
             }, true);
+        }
+    }
+
+    fn client_send_list(&mut self, token: &Token) {
+        let client_names: Vec<String> =
+            self.clients
+                .values()
+                .map(|other_client| other_client.name.clone())
+                .collect();
+
+        if let Some(client) = self.clients.get_mut(token) {
+            let _ = send_message(&mut client.stream, Message::ClientList { client_names: client_names });
         }
     }
 
@@ -282,6 +294,9 @@ impl Server {
                         }
                         Message::ClientMessage { timestamp_secs, msg, .. } => {
                             self.client_broadcast(&token, timestamp_secs, msg);
+                        }
+                        Message::GetClientList => {
+                            self.client_send_list(&token);
                         }
                         _ => {}
                     }

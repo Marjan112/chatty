@@ -89,6 +89,21 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>
                                 format!(": {msg}").into()
                             ]));
                         }
+                        Message::ClientList { client_names } => {
+                            let mut line_content = Vec::<Span>::new();
+ 
+                            messages.push(Line::from("Connected clients:"));
+
+                            for client_name in client_names {
+                                let client_name_color = NAME_COLORS[color_index_from_name(&client_name) as usize];
+
+                                line_content.push(Span::from("- "));
+                                line_content.push(Span::styled(client_name, Style::default().fg(client_name_color)));
+                            }
+
+                            messages.push(Line::from(line_content));
+                        }
+                        _ => {}
                     }
                 },
                 Err(ref err)
@@ -172,16 +187,37 @@ impl App {
                     Key::Esc => self.exit = true,
                     Key::Enter => {
                         let mut messages = self.messages.lock().unwrap();
+
                         let line = self.input_box.lines().join("\n");
                         let line_trimmed = line.trim();
+
                         if !line_trimmed.is_empty() {
+                            if line_trimmed.starts_with("/") {
+                                let cmd = &line_trimmed[1..];
+
+                                match cmd {
+                                    "clear" => messages.clear(),
+                                    "list" => {
+                                        if let Err(err) = send_message(stream, Message::GetClientList) {
+                                            messages.push(format!("list: failed to get client list: {err}").into());
+                                        }
+                                    }
+                                    unknown_cmd => messages.push(format!("CMD: Unknown command {unknown_cmd}").into())
+                                }
+
+                                self.input_box.select_all();
+                                self.input_box.cut();
+
+                                return Ok(());
+                            }
+
                             let timestamp = chrono::Local::now().timestamp();
                             let mut message = Message::ClientMessage {
                                 timestamp_secs: timestamp,
                                 client_name: String::new(),
                                 msg: line_trimmed.to_string(),
                             };
-                            if let Err(err) = send_message(stream, &mut message, true) {
+                            if let Err(err) = send_message_with_timestamp(stream, &mut message, true) {
                                 messages.push(format!("ERROR: Failed to send message: {err}").into());
                             } else {
                                 let datetime = datetime_from_timestamp(timestamp);
@@ -414,7 +450,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         timestamp_secs: 0,
         client_name: name_trimmed.to_string(),
     };
-    send_message(&mut stream, &mut connect_message, false).map_err(|err| {
+    send_message_with_timestamp(&mut stream, &mut connect_message, false).map_err(|err| {
         eprintln!("ERROR: Failed to send your name to the server: {err}");
         err
     })?;

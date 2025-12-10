@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::io::{Error, ErrorKind, Read, Write};
+use std::io::{self, Error, ErrorKind, Read, Write};
 use chrono::{format::{DelayedFormat, StrftimeItems}, Local, TimeZone};
 use bincode::{Decode, Encode};
 
@@ -19,6 +19,10 @@ pub enum Message {
         timestamp_secs: i64,
         client_name: String,
         msg: String
+    },
+    GetClientList,
+    ClientList {
+        client_names: Vec<String>
     }
 }
 
@@ -31,12 +35,14 @@ pub fn datetime_from_timestamp(secs: i64) -> DelayedFormat<StrftimeItems<'static
         .format("%Y-%m-%d %H:%M")
 }
 
-pub fn send_message<T: Write>(stream: &mut T, message: &mut Message, reuse_timestamp: bool) -> Result<(), Error> {
+// TODO: Change this function to send timestamp outside of Message enum
+pub fn send_message_with_timestamp<T: Write>(stream: &mut T, message: &mut Message, reuse_timestamp: bool) -> io::Result<()> {
     if !reuse_timestamp {
         match message {
             Message::ClientConnected { timestamp_secs, .. }
             | Message::ClientDisconnected { timestamp_secs, .. }
             | Message::ClientMessage { timestamp_secs, ..} => *timestamp_secs = chrono::Local::now().timestamp(),
+            _ => {}
         };
     }
 
@@ -49,7 +55,18 @@ pub fn send_message<T: Write>(stream: &mut T, message: &mut Message, reuse_times
     Ok(())
 }
 
-pub fn try_receive_message<T: Read>(stream: &mut T, buffer: &mut Vec<u8>) -> Result<Option<Message>, Error> {
+pub fn send_message<T: Write>(stream: &mut T, message: Message) -> io::Result<()> {
+    let encoded = bincode::encode_to_vec(message, bincode::config::standard()).unwrap();
+    let encoded_len = encoded.len() as u32;
+
+    stream.write_all(&encoded_len.to_le_bytes())?;
+    stream.write_all(&encoded)?;
+
+    Ok(())
+}
+
+// TODO: Return the timestamp with the message if there is a timestamp
+pub fn try_receive_message<T: Read>(stream: &mut T, buffer: &mut Vec<u8>) -> io::Result<Option<Message>> {
     let mut temp = [0u8; 1024];
 
     match stream.read(&mut temp) {
@@ -83,6 +100,7 @@ pub fn try_receive_message<T: Read>(stream: &mut T, buffer: &mut Vec<u8>) -> Res
     }
 }
 
+// TODO: Return the timestamp with the message if there is a timestamp
 pub fn receive_message<T: Read>(stream: &mut T) -> Result<Message, Error> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;

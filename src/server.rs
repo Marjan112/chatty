@@ -177,8 +177,7 @@ impl Server {
             let client_name = client.name.clone();
             println!("INFO: ({}) '{}' says: {}", datetime_from_timestamp(timestamp_secs), client_name, msg);
 
-            let mut broadcast_msg = Message::ClientMessage {
-                timestamp_secs: timestamp_secs,
+            let broadcast_msg = Message::ClientMessage {
                 client_name: client_name,
                 msg: msg
             };
@@ -191,7 +190,7 @@ impl Server {
 
             for other_token in recipients {
                 if let Some(other_client) = self.clients.get_mut(&other_token) {
-                    let _ = send_message_with_timestamp(&mut other_client.stream, &mut broadcast_msg, true);
+                    let _ = send_message(&mut other_client.stream, broadcast_msg.clone(), Some(timestamp_secs));
                 }
             }
 
@@ -199,9 +198,9 @@ impl Server {
         }
     }
 
-    fn server_broadcast(&mut self, mut msg: Message, reuse_timestamp: bool) {
+    fn server_broadcast(&mut self, msg: Message, timestamp_secs: Option<i64>) {
         for (_, client) in &mut self.clients {
-            let _ = send_message_with_timestamp(&mut client.stream, &mut msg, reuse_timestamp);
+            let _ = send_message(&mut client.stream, msg.clone(), timestamp_secs);
         }
         self.messages.push(msg);
     }
@@ -214,18 +213,19 @@ impl Server {
                     Err(err) => eprintln!("ERROR: Failed to get address of the prematurely disconnected client: {err}")
                 }
             } else {
+                let timestamp_secs = Local::now().timestamp();
+
                 let disconn_msg = Message::ClientDisconnected {
-                    timestamp_secs: Local::now().timestamp(),
                     client_name: client.name.clone(),
                     reason: reason.to_string()
                 };
-                if let Message::ClientDisconnected { timestamp_secs, .. } = disconn_msg {
-                    println!("INFO: '{}' disconnected ({} reason: {})",
-                        client.name,
-                        datetime_from_timestamp(timestamp_secs),
-                        reason);
-                    self.server_broadcast(disconn_msg, true);
-                }
+
+                println!("INFO: '{}' disconnected ({} reason: {})",
+                    client.name,
+                    datetime_from_timestamp(timestamp_secs),
+                    reason);
+
+                self.server_broadcast(disconn_msg, Some(timestamp_secs));
             }
 
             if let Err(err) = self.poll.registry().deregister(&mut client.stream) {
@@ -240,14 +240,16 @@ impl Server {
 
             println!("INFO: '{}' connected ({})", client.name, datetime_from_timestamp(timestamp_secs));
 
-            for msg in &mut self.messages {
-                let _ = send_message_with_timestamp(&mut client.stream, msg, true);
+            for msg in &self.messages {
+                let _ = send_message(&mut client.stream, msg.clone(), Some(timestamp_secs));
             }
 
-            self.server_broadcast(Message::ClientConnected {
-                timestamp_secs: timestamp_secs,
-                client_name: client_name
-            }, true);
+            self.server_broadcast(
+                Message::ClientConnected {
+                    client_name: client_name
+                },
+                Some(timestamp_secs)
+            );
         }
     }
 
@@ -259,7 +261,7 @@ impl Server {
                 .collect();
 
         if let Some(client) = self.clients.get_mut(token) {
-            let _ = send_message(&mut client.stream, Message::ClientList { client_names: client_names });
+            let _ = send_message(&mut client.stream, Message::ClientList { client_names: client_names }, None);
         }
     }
 
@@ -287,12 +289,12 @@ impl Server {
                     }
                 };
 
-                if let Some(message) = maybe_message {
+                if let Some((timestamp_secs, message)) = maybe_message {
                     match message {
-                        Message::ClientConnected { timestamp_secs, client_name } => {
+                        Message::ClientConnected { client_name } => {
                             self.client_connected(&token, timestamp_secs, client_name);
                         }
-                        Message::ClientMessage { timestamp_secs, msg, .. } => {
+                        Message::ClientMessage { msg, .. } => {
                             self.client_broadcast(&token, timestamp_secs, msg);
                         }
                         Message::GetClientList => {

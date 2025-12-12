@@ -53,10 +53,10 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>
     thread::spawn(move || {
         loop {
             match receive_message(&mut stream_clone) {
-                Ok(message) => {
+                Ok((timestamp_secs, message)) => {
                     let mut messages = messages.lock().unwrap();
                     match message {
-                        Message::ClientConnected {timestamp_secs, client_name} => {
+                        Message::ClientConnected {client_name} => {
                             let datetime = datetime_from_timestamp(timestamp_secs).to_string();
                             let client_name_color = NAME_COLORS[color_index_from_name(&client_name) as usize];
                             // messages.push(format!("{datetime} '{client_name}' connected"));
@@ -67,7 +67,7 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>
                                 Span::from(" connected"),
                             ]));
                         }
-                        Message::ClientDisconnected {timestamp_secs, client_name, reason} => {
+                        Message::ClientDisconnected {client_name, reason} => {
                             let datetime = datetime_from_timestamp(timestamp_secs).to_string();
                             let client_name_color = NAME_COLORS[color_index_from_name(&client_name) as usize];
                             // messages.push(format!("{datetime} '{client_name}' disconnected (reason: {reason})"));
@@ -78,7 +78,7 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>
                                 format!(" disconnected (reason: {reason})").into()
                             ]));
                         }
-                        Message::ClientMessage {timestamp_secs, client_name, msg} => {
+                        Message::ClientMessage {client_name, msg} => {
                             let datetime = datetime_from_timestamp(timestamp_secs).to_string();
                             let client_name_color = NAME_COLORS[color_index_from_name(&client_name) as usize];
                             // messages.push(format!("{datetime} {client_name}: {msg}"));
@@ -192,7 +192,7 @@ impl App {
                                 match cmd {
                                     "clear" => messages.clear(),
                                     "list" => {
-                                        if let Err(err) = send_message(stream, Message::GetClientList) {
+                                        if let Err(err) = send_message(stream, Message::GetClientList, None) {
                                             messages.push(format!("list: failed to get client list: {err}").into());
                                         }
                                     }
@@ -205,16 +205,17 @@ impl App {
                                 return Ok(());
                             }
 
-                            let timestamp = chrono::Local::now().timestamp();
-                            let mut message = Message::ClientMessage {
-                                timestamp_secs: timestamp,
+                            let message = Message::ClientMessage {
                                 client_name: String::new(),
                                 msg: line_trimmed.to_string(),
                             };
-                            if let Err(err) = send_message_with_timestamp(stream, &mut message, true) {
+
+                            let timestamp_secs = chrono::Local::now().timestamp();
+
+                            if let Err(err) = send_message(stream, message, Some(timestamp_secs)) {
                                 messages.push(format!("ERROR: Failed to send message: {err}").into());
                             } else {
-                                let datetime = datetime_from_timestamp(timestamp);
+                                let datetime = datetime_from_timestamp(timestamp_secs);
                                 let client_name = &self.client_name;
                                 messages.push(format!("{datetime} {client_name}: {line_trimmed}").into());
                             }
@@ -296,7 +297,7 @@ impl App {
     fn draw_input_box(&mut self, frame: &mut Frame, input_box_area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" You: ".white())
+            .title(" You: ".reset())
             .fg(Color::Yellow);
 
         self.input_box.set_block(block);
@@ -440,11 +441,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let mut connect_message = Message::ClientConnected {
-        timestamp_secs: 0,
+    let connect_message = Message::ClientConnected {
         client_name: name_trimmed.to_string(),
     };
-    send_message_with_timestamp(&mut stream, &mut connect_message, false).map_err(|err| {
+    send_message(&mut stream, connect_message, None).map_err(|err| {
         eprintln!("ERROR: Failed to send your name to the server: {err}");
         err
     })?;

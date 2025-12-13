@@ -5,7 +5,9 @@ use std::{
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
-    fmt
+    fmt,
+    hash::{Hash, Hasher},
+    collections::hash_map::DefaultHasher
 };
 use ratatui::{
     crossterm::event::{self, Event},
@@ -17,8 +19,6 @@ use ratatui::{
     Frame,
 };
 use tui_textarea::{Input, Key, TextArea};
-use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
 
 mod message;
 use message::*;
@@ -444,37 +444,7 @@ fn init_handshake(stream: &mut TcpStream) -> Result<(), HandshakeError> {
     Ok(())
 }
 
-#[cfg(windows)]
-fn check_for_updates() -> Result<(), Box<dyn Error>> {
-    println!("INFO: Checking for updates...");
-
-    let status = self_update::backends::github::Update::configure()
-        .repo_owner("Marjan112")
-        .repo_name("chatty")
-        .bin_name("chatty_client")
-        .show_download_progress(true)
-        .current_version(env!("CARGO_PKG_VERSION"))
-        .build()?
-        .update()?;
-
-    if status.updated() {
-        println!("INFO: Update finished, exiting...");
-        std::process::exit(0);
-    } else {
-        println!("INFO: No updates found. Running current version.");
-    }
-
-    Ok(())
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
-    #[cfg(windows)]
-    {
-        if let Err(err) = check_for_updates() {
-            eprintln!("ERROR: check_for_updates: {err}");
-        }
-    }
-
     println!("Enter the server address (ip:port)");
     let mut server_address = String::new();
     stdin().read_line(&mut server_address).unwrap();

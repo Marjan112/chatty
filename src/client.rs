@@ -444,6 +444,7 @@ fn init_handshake(stream: &mut TcpStream) -> Result<(), HandshakeError> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn check_for_updates() -> Result<(), Box<dyn Error>> {
     println!("INFO: Checking for updates...");
 
@@ -451,16 +452,28 @@ fn check_for_updates() -> Result<(), Box<dyn Error>> {
         .repo_owner("Marjan112")
         .repo_name("chatty")
         .bin_name("chatty_client")
+        .show_download_progress(true)
         .current_version(env!("CARGO_PKG_VERSION"))
         .build()?
         .update()?;
 
-    println!("{}", status.version());
+    if status.updated() {
+        println!("INFO: Update finished, exiting...");
+        std::process::exit(0);
+    } else {
+        println!("INFO: No updates found. Running current version.");
+    }
+
     Ok(())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    check_for_updates().ok();
+    #[cfg(windows)]
+    {
+        if let Err(err) = check_for_updates() {
+            eprintln!("ERROR: check_for_updates: {err}");
+        }
+    }
 
     println!("Enter the server address (ip:port)");
     let mut server_address = String::new();

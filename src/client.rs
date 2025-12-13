@@ -118,6 +118,62 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>
     });
 }
 
+fn clear_command(app: &mut App) {
+    let mut messages = app.messages.lock().unwrap();
+    messages.clear();
+}
+
+fn list_command(app: &mut App) {
+    let mut messages = app.messages.lock().unwrap();
+    if let Err(err) = send_message(&mut app.stream, Message::GetClientList, None) {
+        messages.push(format!("list: failed to get client list: {err}").into());
+    }
+}
+
+fn help_command(app: &mut App) {
+    let mut messages = app.messages.lock().unwrap();
+
+    messages.push(Line::from("Help:"));
+
+    for Command {description, signature, ..} in COMMANDS {
+        messages.push(format!("- {signature} - {description}").into());
+    }
+}
+
+struct Command {
+    name: &'static str,
+    description: &'static str,
+    signature: &'static str,
+    run: fn(&mut App)
+}
+
+const COMMANDS: &[Command] = &[
+    Command {
+        name: "clear",
+        description: "Clears the chat",
+        signature: "/clear",
+        run: clear_command
+    },
+    Command {
+        name: "list",
+        description: "Lists the connected clients",
+        signature: "/list",
+        run: list_command
+    },
+    Command {
+        name: "help",
+        description: "Helps, duh",
+        signature: "/help",
+        run: help_command
+    }
+];
+
+fn find_command(name: &str) -> Option<&Command> {
+    COMMANDS
+        .iter()
+        .find(|command| command.name == name)
+}
+
 struct App {
     exit: bool,
     input_box: TextArea<'static>,
@@ -127,13 +183,14 @@ struct App {
     last_tick: Instant,
     max_scroll: usize,
     auto_scroll: bool,
-    client_name: String
+    client_name: String,
+    stream: TcpStream
 }
 
 impl App {
     const TICK_RATE: Duration = Duration::from_millis(250);
 
-    fn new(client_name: &str) -> Self {
+    fn new(client_name: &str, stream: TcpStream) -> Self {
         Self {
             exit: false,
             input_box: TextArea::default(),
@@ -168,11 +225,12 @@ impl App {
             last_tick: Instant::now(),
             max_scroll: 0,
             auto_scroll: true,
-            client_name: client_name.to_string()
+            client_name: client_name.to_string(),
+            stream: stream
         }
     }
 
-    fn handle_events(&mut self, stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
+    fn handle_events(&mut self) -> Result<(), Box<dyn Error>> {
         let timeout = Self::TICK_RATE.saturating_sub(self.last_tick.elapsed());
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
@@ -180,46 +238,46 @@ impl App {
                 match input.key {
                     Key::Esc => self.exit = true,
                     Key::Enter => {
+                        let input = self.input_box.lines().join("\n");
+                        let line = input.trim();
+
+                        if line.is_empty() {
+                            return Ok(());
+                        }
+
+                        if line.starts_with("/") {
+                            let cmd_name = &line[1..];
+
+                            if let Some(cmd) = find_command(cmd_name) {
+                                (cmd.run)(self);
+                            } else {
+                                let mut messages = self.messages.lock().unwrap();
+                                messages.push(format!("CMD: Unknown command {cmd_name}").into());
+                            }
+
+                            self.input_box.select_all();
+                            self.input_box.cut();
+
+                            return Ok(());
+                        }
+
+                        let message = Message::ClientMessage {
+                            client_name: String::new(),
+                            msg: line.to_string(),
+                        };
+
+                        let timestamp_secs = chrono::Local::now().timestamp();
+
                         let mut messages = self.messages.lock().unwrap();
 
-                        let line = self.input_box.lines().join("\n");
-                        let line_trimmed = line.trim();
-
-                        if !line_trimmed.is_empty() {
-                            if line_trimmed.starts_with("/") {
-                                let cmd = &line_trimmed[1..];
-
-                                match cmd {
-                                    "clear" => messages.clear(),
-                                    "list" => {
-                                        if let Err(err) = send_message(stream, Message::GetClientList, None) {
-                                            messages.push(format!("list: failed to get client list: {err}").into());
-                                        }
-                                    }
-                                    unknown_cmd => messages.push(format!("CMD: Unknown command {unknown_cmd}").into())
-                                }
-
-                                self.input_box.select_all();
-                                self.input_box.cut();
-
-                                return Ok(());
-                            }
-
-                            let message = Message::ClientMessage {
-                                client_name: String::new(),
-                                msg: line_trimmed.to_string(),
-                            };
-
-                            let timestamp_secs = chrono::Local::now().timestamp();
-
-                            if let Err(err) = send_message(stream, message, Some(timestamp_secs)) {
-                                messages.push(format!("ERROR: Failed to send message: {err}").into());
-                            } else {
-                                let datetime = datetime_from_timestamp(timestamp_secs);
-                                let client_name = &self.client_name;
-                                messages.push(format!("{datetime} {client_name}: {line_trimmed}").into());
-                            }
+                        if let Err(err) = send_message(&mut self.stream, message, Some(timestamp_secs)) {
+                            messages.push(format!("ERROR: Failed to send message: {err}").into());
+                        } else {
+                            let datetime = datetime_from_timestamp(timestamp_secs);
+                            let client_name = &self.client_name;
+                            messages.push(format!("{datetime} {client_name}: {line}").into());
                         }
+
                         self.input_box.select_all();
                         self.input_box.cut();
                     }
@@ -231,15 +289,16 @@ impl App {
                 }
             }
         }
+
         Ok(())
     }
 
-    fn run(&mut self, terminal: &mut DefaultTerminal, stream: &mut TcpStream) -> Result<(), Box<dyn Error>> {
-        receive_messages(stream, self.messages.clone());
+    fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<(), Box<dyn Error>> {
+        receive_messages(&self.stream, self.messages.clone());
 
         while !self.exit {
             terminal.draw(|frame| self.draw_ui(frame))?;
-            self.handle_events(stream)?;
+            self.handle_events()?;
 
             if self.last_tick.elapsed() >= Self::TICK_RATE {
                 self.last_tick = Instant::now();
@@ -450,7 +509,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
 
     let mut terminal = ratatui::init();
-    let app_result = App::new(name_trimmed).run(&mut terminal, &mut stream);
+    let app_result = App::new(name_trimmed, stream).run(&mut terminal);
     ratatui::restore();
     app_result
 }

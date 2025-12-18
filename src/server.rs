@@ -23,7 +23,7 @@ struct Server {
     listener: TcpListener,
     poll: Poll,
     clients: HashMap<Token, Client>,
-    messages: Vec<Message>,
+    messages: Vec<(i64, Message)>,
 }
 
 fn read_magic(stream: &mut TcpStream, magic: &mut [u8; 8]) -> io::Result<()> {
@@ -194,15 +194,15 @@ impl Server {
                 }
             }
 
-            self.messages.push(broadcast_msg);
+            self.messages.push((timestamp_secs, broadcast_msg));
         }
     }
 
-    fn server_broadcast(&mut self, msg: Message, timestamp_secs: Option<i64>) {
+    fn server_broadcast(&mut self, msg: Message, timestamp_secs: i64) {
         for (_, client) in &mut self.clients {
-            let _ = send_message(&mut client.stream, msg.clone(), timestamp_secs);
+            let _ = send_message(&mut client.stream, msg.clone(), Some(timestamp_secs));
         }
-        self.messages.push(msg);
+        self.messages.push((timestamp_secs, msg));
     }
 
     fn client_disconnected(&mut self, token: &Token, reason: &str) {
@@ -225,7 +225,7 @@ impl Server {
                     datetime_from_timestamp(timestamp_secs),
                     reason);
 
-                self.server_broadcast(disconn_msg, Some(timestamp_secs));
+                self.server_broadcast(disconn_msg, timestamp_secs);
             }
 
             if let Err(err) = self.poll.registry().deregister(&mut client.stream) {
@@ -240,15 +240,15 @@ impl Server {
 
             println!("INFO: '{}' connected ({})", client.name, datetime_from_timestamp(timestamp_secs));
 
-            for msg in &self.messages {
-                let _ = send_message(&mut client.stream, msg.clone(), Some(timestamp_secs));
+            for (timestamp, msg) in &self.messages {
+                let _ = send_message(&mut client.stream, msg.clone(), Some(timestamp.clone()));
             }
 
             self.server_broadcast(
                 Message::ClientConnected {
                     client_name: client_name
                 },
-                Some(timestamp_secs)
+                timestamp_secs
             );
         }
     }

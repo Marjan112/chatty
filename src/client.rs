@@ -392,8 +392,8 @@ impl fmt::Display for HandshakeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             HandshakeError::IO(err) => write!(f, "{err}"),
-            HandshakeError::Timeout => write!(f, "timeout expired"),
-            HandshakeError::InvalidMagic => write!(f, "server returned invalid magic bytes")
+            HandshakeError::Timeout => write!(f, "Timeout expired"),
+            HandshakeError::InvalidMagic => write!(f, "Not a ChaTTY server")
         }
     }
 }
@@ -407,37 +407,22 @@ impl From<io::Error> for HandshakeError {
 impl Error for HandshakeError {}
 
 fn init_handshake(stream: &mut TcpStream) -> Result<(), HandshakeError> {
-    println!("INFO: Initializing handshake...");
-
     stream.write_all(b"ChaTTY\0\0").map_err(|err| {
         match err.kind() {
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
-                eprintln!("ERROR: Handshake failed: Timeout expired");
-                HandshakeError::Timeout
-            }
-            _ => {
-                eprintln!("ERROR: Handshake failed: {err}");
-                HandshakeError::IO(err)
-            }
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => HandshakeError::Timeout,
+            _ => HandshakeError::IO(err)
         }
     })?;
 
     let mut server_magic_buf = [0u8; 8];
     stream.read_exact(&mut server_magic_buf).map_err(|err| {
         match err.kind() {
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
-                eprintln!("ERROR: Handshake failed: Timeout expired");
-                HandshakeError::Timeout
-            }
-            _ => {
-                eprintln!("ERROR: Handshake failed: {err}");
-                HandshakeError::IO(err)
-            }
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => HandshakeError::Timeout,
+            _ => HandshakeError::IO(err)
         }
     })?;
 
     if server_magic_buf != *b"ChaTTY\0\0" {
-        eprintln!("ERROR: Handshake failed: Not a ChaTTY server");
         return Err(HandshakeError::InvalidMagic);
     }
 
@@ -471,8 +456,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
 
     println!("INFO: Connected to {server_sock_addr}");
-
-    init_handshake(&mut stream)?;
+    println!("INFO: Initiating a handshake...");
+    init_handshake(&mut stream).map_err(|err| {
+        eprintln!("ERROR: Handshake failed: {err}");
+        err
+    })?;
 
     println!("Enter your name:");
     let mut name = String::new();

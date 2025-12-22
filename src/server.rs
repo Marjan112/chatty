@@ -67,14 +67,7 @@ impl Server {
         })
     }
 
-    fn init_handshake(&mut self, stream: &mut TcpStream, addr: &SocketAddr) -> bool {
-        let disconnect_by_stream = move |stream: &mut TcpStream, addr: &SocketAddr| {
-            if let Err(err) = self.poll.registry().deregister(stream) {
-                eprintln!("ERROR: Failed to deregister client {addr} from the poll object: {err}");
-            }
-            let _ = stream.shutdown(Shutdown::Both);
-        };
-
+    fn init_handshake(&mut self, stream: &mut TcpStream) -> bool {
         const MAX_TRIES: i32 = 500;
 
         let expected_magic = *b"ChaTTY\0\0";
@@ -86,39 +79,32 @@ impl Server {
             match read_magic(stream, &mut magic_buf) {
                 Ok(_) => break,
                 Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
-                    // println!("INFO: Handshake with client {addr} failed, trying again ({i})");
-
                     if i >= MAX_TRIES {
-                        // eprintln!("ERROR: Handshake with client {addr} failed: {err}");
-                        disconnect_by_stream(stream, addr);
+                        let _ = stream.shutdown(Shutdown::Both);
                         return false;
                     }
 
                     continue;
                 }
                 Err(_err) => {
-                    // eprintln!("ERROR: Handshake with client {addr} failed: {err}");
-                    disconnect_by_stream(stream, addr);
+                    let _ = stream.shutdown(Shutdown::Both);
                     return false;
                 }
             }
         }
 
         if magic_buf != expected_magic {
-            // println!("INFO: Invalid client {addr} tried to connect");
-            disconnect_by_stream(stream, addr);
+            let _ = stream.shutdown(Shutdown::Both);
             return false;
         }
 
-        if let Err(_err) = stream.write_all(&mut magic_buf) {
-            // eprintln!("ERROR: Handshake with client {addr} failed: {err}");
-            disconnect_by_stream(stream, addr);
+        if stream.write_all(&mut magic_buf).is_err() {
+            let _ = stream.shutdown(Shutdown::Both);
             return false;
         }
 
-        if let Err(_err) = stream.peer_addr() {
-            // eprintln!("ERROR: Handshake with client {addr} failed: {err}");
-            disconnect_by_stream(stream, addr);
+        if stream.peer_addr().is_err() {
+            let _ = stream.shutdown(Shutdown::Both);
             return false;
         }
 
@@ -139,16 +125,15 @@ impl Server {
                 match token {
                     Token(0) => match self.listener.accept() {
                         Ok((mut stream, addr)) => {
+                            if !self.init_handshake(&mut stream) {
+                                continue;
+                            }
+
                             counter += 1;
                             let client_token = Token(counter);
-                            match self.poll.registry().register(&mut stream, client_token, Interest::READABLE) {
-                                Ok(_) => {
-                                    if !self.init_handshake(&mut stream, &addr) {
-                                        continue;
-                                    }
 
-                                    self.client_incoming(stream, addr, client_token)
-                                }
+                            match self.poll.registry().register(&mut stream, client_token, Interest::READABLE) {
+                                Ok(_) => self.client_incoming(stream, addr, client_token),
                                 Err(err) => eprintln!("ERROR: Failed to register client in the poll object: {err}")
                             }
                         }

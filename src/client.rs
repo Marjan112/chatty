@@ -23,6 +23,9 @@ use tui_textarea::{Input, Key, TextArea};
 mod message;
 use message::*;
 
+mod env;
+use env::*;
+
 const NAME_COLORS: &[Color] = &[
     Color::Red,
     Color::Green,
@@ -59,7 +62,6 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>
                         Message::ClientConnected {client_name} => {
                             let datetime = datetime_from_timestamp(timestamp_secs).to_string();
                             let client_name_color = NAME_COLORS[color_index_from_name(&client_name) as usize];
-                            // messages.push(format!("{datetime} '{client_name}' connected"));
                             messages.push(Line::from(vec![
                                 datetime.into(),
                                 Span::from(" "),
@@ -70,7 +72,6 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>
                         Message::ClientDisconnected {client_name, reason} => {
                             let datetime = datetime_from_timestamp(timestamp_secs).to_string();
                             let client_name_color = NAME_COLORS[color_index_from_name(&client_name) as usize];
-                            // messages.push(format!("{datetime} '{client_name}' disconnected (reason: {reason})"));
                             messages.push(Line::from(vec![
                                 datetime.into(),
                                 Span::from(" "),
@@ -81,7 +82,6 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>
                         Message::ClientMessage {client_name, msg} => {
                             let datetime = datetime_from_timestamp(timestamp_secs).to_string();
                             let client_name_color = NAME_COLORS[color_index_from_name(&client_name) as usize];
-                            // messages.push(format!("{datetime} {client_name}: {msg}"));
                             messages.push(Line::from(vec![
                                 datetime.into(),
                                 Span::from(" "),
@@ -198,7 +198,8 @@ impl App {
                 vec![
                     Line::from(vec![
                         "Welcome to ".into(),
-                        "ChaTTY".yellow(),
+                        "ChaTTY ".yellow(),
+                        CHATTY_VERSION.yellow(),
                         "!".into()
                     ]),
                     Line::from(vec![
@@ -430,6 +431,8 @@ fn init_handshake(stream: &mut TcpStream) -> Result<(), HandshakeError> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    println!("INFO: ChaTTY {CHATTY_VERSION}");
+
     println!("Enter the server address (ip:port)");
     let mut server_address = String::new();
     stdin().read_line(&mut server_address).unwrap();

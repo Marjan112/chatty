@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::io::{self, Error, ErrorKind, Read, Write};
+use std::io::{self, Error, Read, Write};
 use chrono::{format::{DelayedFormat, StrftimeItems}, Local, TimeZone};
 use bincode::{Decode, Encode};
 
@@ -54,9 +54,9 @@ pub fn try_receive_message<T: Read>(stream: &mut T, buffer: &mut Vec<u8>) -> io:
     let mut temp = [0u8; 1024];
 
     match stream.read(&mut temp) {
-        Ok(0) => return Err(Error::new(ErrorKind::UnexpectedEof, "connection closed")),
+        Ok(0) => return Err(Error::new(io::ErrorKind::UnexpectedEof, "connection closed")),
         Ok(n) => buffer.extend_from_slice(&temp[..n]),
-        Err(ref err) if err.kind() == ErrorKind::WouldBlock => return Ok(None),
+        Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(None),
         Err(err) => return Err(err)
     }
 
@@ -83,7 +83,7 @@ pub fn try_receive_message<T: Read>(stream: &mut T, buffer: &mut Vec<u8>) -> io:
                 &msg_bytes,
                 bincode::config::standard()
             )
-            .map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
+            .map_err(|err| Error::new(io::ErrorKind::InvalidData, err))?;
 
         return Ok(Some((timestamp, msg)));
     }

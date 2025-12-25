@@ -13,6 +13,9 @@ use chrono::Local;
 mod message;
 use message::*;
 
+mod env;
+use env::*;
+
 struct Client {
     stream: TcpStream,
     name: String,
@@ -260,8 +263,23 @@ impl Server {
                 break;
             }
             if let Some(client) = self.clients.get_mut(&token) {
-                let maybe_message = match try_receive_message(&mut client.stream, &mut client.buffer) {
-                    Ok(message_opt) => message_opt,
+                match try_receive_message(&mut client.stream, &mut client.buffer) {
+                    Ok(timestamp_message) => {
+                        if let Some((timestamp_secs, message)) = timestamp_message {
+                            match message {
+                                Message::ClientConnected { client_name } => {
+                                    self.client_connected(&token, timestamp_secs, client_name);
+                                }
+                                Message::ClientMessage { msg, .. } => {
+                                    self.client_broadcast(&token, timestamp_secs, msg);
+                                }
+                                Message::GetClientList => {
+                                    self.client_send_list(&token);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     Err(ref err) if err.kind() == ErrorKind::WouldBlock => break,
                     Err(err) => {
                         let error_message = err.to_string();
@@ -273,27 +291,13 @@ impl Server {
                         break;
                     }
                 };
-
-                if let Some((timestamp_secs, message)) = maybe_message {
-                    match message {
-                        Message::ClientConnected { client_name } => {
-                            self.client_connected(&token, timestamp_secs, client_name);
-                        }
-                        Message::ClientMessage { msg, .. } => {
-                            self.client_broadcast(&token, timestamp_secs, msg);
-                        }
-                        Message::GetClientList => {
-                            self.client_send_list(&token);
-                        }
-                        _ => {}
-                    }
-                }
             }
         }
     }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    println!("INFO: ChaTTY server {CHATTY_VERSION}");
     let mut server = Server::new()?;
     server.listen();
 }

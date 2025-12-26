@@ -6,7 +6,7 @@ use std::{
     collections::HashMap,
     error::Error,
     io::{self, ErrorKind, Read, Write},
-    net::{Shutdown, SocketAddr},
+    net::SocketAddr,
 };
 use chrono::Local;
 
@@ -16,10 +16,18 @@ use message::*;
 mod env;
 use env::*;
 
+#[derive(Default)]
+struct HandshakeState {
+    magic: [u8; 8],
+    read_count: usize,
+    finished: bool
+}
+
 struct Client {
     stream: TcpStream,
     name: String,
-    buffer: Vec<u8>
+    buffer: Vec<u8>,
+    hs_state: HandshakeState
 }
 
 struct Server {
@@ -27,21 +35,6 @@ struct Server {
     poll: Poll,
     clients: HashMap<Token, Client>,
     messages: Vec<(i64, Message)>,
-}
-
-fn read_magic(stream: &mut TcpStream, magic: &mut [u8; 8]) -> io::Result<()> {
-    let mut read = 0;
-    while read < 8 {
-        match stream.read(&mut magic[read..]) {
-            Ok(0) => return Err(ErrorKind::ConnectionReset.into()),
-            Ok(n) => read += n,
-            Err(ref err)
-                if err.kind() == ErrorKind::WouldBlock => return Err(ErrorKind::WouldBlock.into()),
-            Err(err) => return Err(err),
-        }
-    }
-
-    Ok(())
 }
 
 impl Server {
@@ -70,50 +63,6 @@ impl Server {
         })
     }
 
-    fn init_handshake(&mut self, stream: &mut TcpStream) -> bool {
-        const MAX_TRIES: i32 = 500;
-
-        let expected_magic = *b"ChaTTY\0\0";
-
-        let mut magic_buf = [0u8; 8];
-        // just a hack till i figure this out
-        // TODO: implement a proper async handshake
-        for i in 1..(MAX_TRIES + 1) {
-            match read_magic(stream, &mut magic_buf) {
-                Ok(_) => break,
-                Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
-                    if i >= MAX_TRIES {
-                        let _ = stream.shutdown(Shutdown::Both);
-                        return false;
-                    }
-
-                    continue;
-                }
-                Err(_err) => {
-                    let _ = stream.shutdown(Shutdown::Both);
-                    return false;
-                }
-            }
-        }
-
-        if magic_buf != expected_magic {
-            let _ = stream.shutdown(Shutdown::Both);
-            return false;
-        }
-
-        if stream.write_all(&mut magic_buf).is_err() {
-            let _ = stream.shutdown(Shutdown::Both);
-            return false;
-        }
-
-        if stream.peer_addr().is_err() {
-            let _ = stream.shutdown(Shutdown::Both);
-            return false;
-        }
-
-        return true;
-    }
-
     fn listen(&mut self) -> ! {
         let mut events = Events::with_capacity(1024);
         let mut counter = 0;
@@ -128,10 +77,6 @@ impl Server {
                 match token {
                     Token(0) => match self.listener.accept() {
                         Ok((mut stream, addr)) => {
-                            if !self.init_handshake(&mut stream) {
-                                continue;
-                            }
-
                             counter += 1;
                             let client_token = Token(counter);
 
@@ -156,7 +101,8 @@ impl Server {
         self.clients.insert(token, Client {
             stream: stream,
             name: String::new(),
-            buffer: Vec::new()
+            buffer: Vec::new(),
+            hs_state: HandshakeState::default()
         });
     }
 
@@ -197,7 +143,7 @@ impl Server {
         if let Some(mut client) = self.clients.remove(&token) {
             if client.name.is_empty() {
                 match client.stream.peer_addr() {
-                    Ok(addr) => println!("INFO: {addr} disconnected prematurely"),
+                    Ok(addr) => println!("INFO: {addr} disconnected prematurely (reason: {reason})"),
                     Err(err) => eprintln!("ERROR: Failed to get address of the prematurely disconnected client: {err}")
                 }
             } else {
@@ -254,6 +200,12 @@ impl Server {
     }
 
     fn client_read(&mut self, token: Token) {
+        if self.client_handshake(&token) {
+            self.client_read_messages(&token);
+        }
+    }
+
+    fn client_read_messages(&mut self, token: &Token) {
         let mut read_ops: u32 = 0;
         const READS_PER_TICK: u32 = 32;
 
@@ -262,19 +214,19 @@ impl Server {
             if read_ops > READS_PER_TICK {
                 break;
             }
-            if let Some(client) = self.clients.get_mut(&token) {
+            if let Some(client) = self.clients.get_mut(token) {
                 match try_receive_message(&mut client.stream, &mut client.buffer) {
                     Ok(timestamp_message) => {
                         if let Some((timestamp_secs, message)) = timestamp_message {
                             match message {
                                 Message::ClientConnected { client_name } => {
-                                    self.client_connected(&token, timestamp_secs, client_name);
+                                    self.client_connected(token, timestamp_secs, client_name);
                                 }
                                 Message::ClientMessage { msg, .. } => {
-                                    self.client_broadcast(&token, timestamp_secs, msg);
+                                    self.client_broadcast(token, timestamp_secs, msg);
                                 }
                                 Message::GetClientList => {
-                                    self.client_send_list(&token);
+                                    self.client_send_list(token);
                                 }
                                 _ => {}
                             }
@@ -287,10 +239,54 @@ impl Server {
                         if err.kind() == ErrorKind::ConnectionReset {
                             reason = "connection closed";
                         }
-                        self.client_disconnected(&token, reason);
+                        self.client_disconnected(token, reason);
                         break;
                     }
                 };
+            }
+        }
+    }
+
+    fn client_handshake(&mut self, token: &Token) -> bool {
+        let client = match self.clients.get_mut(token) {
+            Some(c) => c,
+            None => return false,
+        };
+
+        if client.hs_state.finished {
+            return true;
+        }
+
+        const EXPECTED_MAGIC: &'static [u8] = b"ChaTTY\0\0";
+
+        match client.stream.read(&mut client.hs_state.magic[client.hs_state.read_count..]) {
+            Ok(0) => {
+                self.client_disconnected(token, "connection closed");
+                false
+            }
+            Ok(n) => {
+                client.hs_state.read_count += n;
+                if client.hs_state.read_count < 8 {
+                    return false;
+                }
+
+                if client.hs_state.magic != EXPECTED_MAGIC {
+                    self.client_disconnected(token, "invalid client");
+                    return false;
+                }
+
+                if let Err(err) = client.stream.write_all(EXPECTED_MAGIC) {
+                    self.client_disconnected(token, &err.to_string());
+                    return false;
+                }
+
+                client.hs_state.finished = true;
+                true
+            }
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return false,
+            Err(err) => {
+                self.client_disconnected(token, &err.to_string());
+                false
             }
         }
     }

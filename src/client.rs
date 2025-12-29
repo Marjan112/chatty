@@ -37,7 +37,6 @@ const NAME_COLORS: &[Color] = &[
     Color::LightGreen,
     Color::LightYellow,
     Color::LightBlue,
-    Color::LightMagenta,
     Color::LightMagenta
 ];
 
@@ -49,6 +48,28 @@ fn color_index_from_name(name: &str) -> u8 {
     let index = (hash as usize) % NAME_COLORS.len();
 
     index as u8
+}
+
+pub fn receive_message(stream: &mut TcpStream) -> io::Result<(i64, Message)> {
+    let mut timestamp_buf = [0u8; 8];
+    stream.read_exact(&mut timestamp_buf)?;
+    let timestamp = i64::from_le_bytes(timestamp_buf);
+
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let len = u32::from_le_bytes(len_buf);
+
+    let mut buf = vec![0u8; len as usize];
+    stream.read_exact(&mut buf)?;
+
+    let (decoded, _): (Message, usize) =
+        bincode::decode_from_slice(
+            &buf,
+            bincode::config::standard()
+        )
+        .unwrap();
+
+    Ok((timestamp, decoded))
 }
 
 fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>) {

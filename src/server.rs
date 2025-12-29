@@ -5,7 +5,7 @@ use mio::{
 use std::{
     collections::HashMap,
     error::Error,
-    io::{self, ErrorKind, Read, Write},
+    io::{self, Read, Write},
     net::SocketAddr,
 };
 use chrono::Local;
@@ -28,6 +28,47 @@ struct Client {
     name: String,
     buffer: Vec<u8>,
     hs_state: HandshakeState
+}
+
+impl Client {
+    fn receive_message(&mut self) -> io::Result<Option<(i64, Message)>> {
+        let mut temp = [0u8; 1024];
+
+        match self.stream.read(&mut temp) {
+            Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed")),
+            Ok(n) => self.buffer.extend_from_slice(&temp[..n]),
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+            Err(err) => return Err(err)
+        }
+
+        loop {
+            if self.buffer.len() < 8 {
+                return Ok(None);
+            }
+            let timestamp = i64::from_le_bytes(self.buffer[0..8].try_into().unwrap());
+
+            if self.buffer.len() < 12 {
+                return Ok(None);
+            }
+            let len = u32::from_le_bytes(self.buffer[8..12].try_into().unwrap()) as usize;
+
+            if self.buffer.len() < 12 + len {
+                return Ok(None);
+            }
+
+            let msg_bytes = self.buffer[12..(12 + len)].to_vec();
+            self.buffer.drain(0..(12 + len));
+
+            let (msg, _): (Message, usize) =
+                bincode::decode_from_slice(
+                    &msg_bytes,
+                    bincode::config::standard()
+                )
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+
+            return Ok(Some((timestamp, msg)));
+        }
+    }
 }
 
 struct Server {
@@ -85,7 +126,7 @@ impl Server {
                                 Err(err) => eprintln!("ERROR: Failed to register client in the poll object: {err}")
                             }
                         }
-                        Err(err) if err.kind() != ErrorKind::WouldBlock => {
+                        Err(err) if err.kind() != io::ErrorKind::WouldBlock => {
                             eprintln!("ERROR: Failed to accept client: {err}");
                         }
                         Err(_) => {}
@@ -215,7 +256,7 @@ impl Server {
                 break;
             }
             if let Some(client) = self.clients.get_mut(token) {
-                match try_receive_message(&mut client.stream, &mut client.buffer) {
+                match client.receive_message() {
                     Ok(timestamp_message) => {
                         if let Some((timestamp_secs, message)) = timestamp_message {
                             match message {
@@ -232,11 +273,11 @@ impl Server {
                             }
                         }
                     }
-                    Err(ref err) if err.kind() == ErrorKind::WouldBlock => break,
+                    Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
                     Err(err) => {
                         let error_message = err.to_string();
                         let mut reason = error_message.as_str();
-                        if err.kind() == ErrorKind::ConnectionReset {
+                        if err.kind() == io::ErrorKind::ConnectionReset {
                             reason = "connection closed";
                         }
                         self.client_disconnected(token, reason);

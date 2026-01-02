@@ -1,8 +1,21 @@
 #![allow(dead_code)]
 
-use std::io::{self, Write};
+use std::{io::{self, Write}, fmt};
 use chrono::{format::{DelayedFormat, StrftimeItems}, Local, TimeZone};
 use bincode::{Decode, Encode};
+
+#[derive(Encode, Decode, Clone)]
+pub enum KickReason {
+    NameTaken
+}
+
+impl fmt::Display for KickReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NameTaken => write!(f, "Name was already taken")
+        }
+    }
+}
 
 #[derive(Encode, Decode, Clone)]
 pub enum Message {
@@ -20,6 +33,10 @@ pub enum Message {
     GetClientList,
     ClientList {
         client_names: Vec<String>
+    },
+    ClientKicked {
+        client_name: String,
+        reason: KickReason
     }
 }
 

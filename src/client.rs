@@ -40,14 +40,12 @@ const NAME_COLORS: &[Color] = &[
     Color::LightMagenta
 ];
 
-fn color_index_from_name(name: &str) -> u8 {
+fn color_index_from_name(name: &str) -> usize {
     let mut hasher = DefaultHasher::new();
     name.to_lowercase().hash(&mut hasher);
     let hash = hasher.finish();
 
-    let index = (hash as usize) % NAME_COLORS.len();
-
-    index as u8
+    (hash as usize) % NAME_COLORS.len()
 }
 
 pub fn receive_message(stream: &mut TcpStream) -> io::Result<(i64, Message)> {
@@ -72,17 +70,17 @@ pub fn receive_message(stream: &mut TcpStream) -> io::Result<(i64, Message)> {
     Ok((timestamp, decoded))
 }
 
-fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>) {
+fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>, name: String) {
     let mut stream_clone = stream.try_clone().unwrap();
     thread::spawn(move || {
         loop {
             match receive_message(&mut stream_clone) {
                 Ok((timestamp_secs, message)) => {
                     let mut messages = messages.lock().unwrap();
+                    let datetime = datetime_from_timestamp(timestamp_secs).to_string();
                     match message {
                         Message::ClientConnected {client_name} => {
-                            let datetime = datetime_from_timestamp(timestamp_secs).to_string();
-                            let client_name_color = NAME_COLORS[color_index_from_name(&client_name) as usize];
+                            let client_name_color = NAME_COLORS[color_index_from_name(&client_name)];
                             messages.push(Line::from(vec![
                                 datetime.into(),
                                 Span::from(" "),
@@ -91,8 +89,7 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>
                             ]));
                         }
                         Message::ClientDisconnected {client_name, reason} => {
-                            let datetime = datetime_from_timestamp(timestamp_secs).to_string();
-                            let client_name_color = NAME_COLORS[color_index_from_name(&client_name) as usize];
+                            let client_name_color = NAME_COLORS[color_index_from_name(&client_name)];
                             messages.push(Line::from(vec![
                                 datetime.into(),
                                 Span::from(" "),
@@ -101,8 +98,7 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>
                             ]));
                         }
                         Message::ClientMessage {client_name, msg} => {
-                            let datetime = datetime_from_timestamp(timestamp_secs).to_string();
-                            let client_name_color = NAME_COLORS[color_index_from_name(&client_name) as usize];
+                            let client_name_color = NAME_COLORS[color_index_from_name(&client_name)];
                             messages.push(Line::from(vec![
                                 datetime.into(),
                                 Span::from(" "),
@@ -114,8 +110,13 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>
                             messages.push(Line::from("Connected clients:"));
 
                             for client_name in client_names {
-                                let client_name_color = NAME_COLORS[color_index_from_name(&client_name) as usize];
+                                let client_name_color = NAME_COLORS[color_index_from_name(&client_name)];
                                 messages.push(Line::styled(format!("- {client_name}"), Style::default().fg(client_name_color)));
+                            }
+                        }
+                        Message::ClientKicked {client_name, reason} => {
+                            if client_name == name {
+                                messages.push(format!("INFO: You are kicked from the server (reason: {reason})").into());
                             }
                         }
                         _ => {}
@@ -204,7 +205,7 @@ struct App {
     last_tick: Instant,
     max_scroll: usize,
     auto_scroll: bool,
-    client_name: String,
+    name: String,
     stream: TcpStream
 }
 
@@ -247,7 +248,7 @@ impl App {
             last_tick: Instant::now(),
             max_scroll: 0,
             auto_scroll: true,
-            client_name: client_name.to_string(),
+            name: client_name.to_string(),
             stream: stream
         }
     }
@@ -296,7 +297,7 @@ impl App {
                             messages.push(format!("ERROR: Failed to send message: {err}").into());
                         } else {
                             let datetime = datetime_from_timestamp(timestamp_secs);
-                            let client_name = &self.client_name;
+                            let client_name = &self.name;
                             messages.push(format!("{datetime} {client_name}: {line}").into());
                         }
 
@@ -316,7 +317,7 @@ impl App {
     }
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<(), Box<dyn Error>> {
-        receive_messages(&self.stream, self.messages.clone());
+        receive_messages(&self.stream, self.messages.clone(), self.name.clone());
 
         while !self.exit {
             terminal.draw(|frame| self.draw_ui(frame))?;

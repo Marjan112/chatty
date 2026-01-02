@@ -18,7 +18,6 @@ use env::*;
 
 #[derive(Default)]
 struct HandshakeState {
-    magic: [u8; 8],
     read_count: usize,
     finished: bool
 }
@@ -195,25 +194,42 @@ impl Server {
                     reason: reason.to_string()
                 };
 
-                println!("INFO: '{}' disconnected ({} reason: {})",
-                    client.name,
-                    datetime_from_timestamp(timestamp_secs),
-                    reason);
+                println!("INFO: '{}' disconnected at {} reason: {}", client.name, datetime_from_timestamp(timestamp_secs), reason);
 
                 self.server_broadcast(disconn_msg, timestamp_secs);
             }
 
             if let Err(err) = self.poll.registry().deregister(&mut client.stream) {
-                eprintln!("ERROR: Failed to deregister client '{}' from the poll object: {err}", client.name);
+                eprintln!("ERROR: Failed to deregister client '{}' from the poll object: {}", client.name, err);
+            }
+        }
+    }
+
+    fn kick_client(&mut self, token: &Token, client_name: String, reason: KickReason) {
+        if let Some(mut client) = self.clients.remove(token) {
+            match client.stream.peer_addr() {
+                Ok(addr) => println!("INFO: {addr} was kicked (reason: {reason})"),
+                Err(err) => eprintln!("ERROR: Failed to get address of the kicked client: {err}")
+            }
+
+            let _ = send_message(&mut client.stream, Message::ClientKicked {client_name, reason}, None);
+
+            if let Err(err) = self.poll.registry().deregister(&mut client.stream) {
+                eprintln!("ERROR: Failed to deregister client '{}' from the poll object: {}", client.name, err);
             }
         }
     }
 
     fn client_connected(&mut self, token: &Token, timestamp_secs: i64, client_name: String) {
+        if self.clients.iter().find(|(_, c)| { c.name == client_name }).is_some() {
+            self.kick_client(token, client_name, KickReason::NameTaken);
+            return;
+        }
+
         if let Some(client) = self.clients.get_mut(token) {
             client.name = client_name.clone();
 
-            println!("INFO: '{}' connected ({})", client.name, datetime_from_timestamp(timestamp_secs));
+            println!("INFO: '{}' connected at {}", client.name, datetime_from_timestamp(timestamp_secs));
 
             for (timestamp, msg) in &self.messages {
                 let _ = send_message(&mut client.stream, msg.clone(), Some(timestamp.clone()));
@@ -232,6 +248,7 @@ impl Server {
         let client_names: Vec<String> =
             self.clients
                 .values()
+                .filter(|other_client| !other_client.name.is_empty())
                 .map(|other_client| other_client.name.clone())
                 .collect();
 
@@ -300,21 +317,27 @@ impl Server {
 
         const EXPECTED_MAGIC: &'static [u8] = b"ChaTTY\0\0";
 
-        match client.stream.read(&mut client.hs_state.magic[client.hs_state.read_count..]) {
+        let mut temp = [0u8; 8];
+
+        match client.stream.read(&mut temp) {
             Ok(0) => {
                 self.client_disconnected(token, "connection closed");
                 false
             }
             Ok(n) => {
+                client.buffer.extend_from_slice(&temp[..n]);
+
                 client.hs_state.read_count += n;
                 if client.hs_state.read_count < 8 {
                     return false;
                 }
 
-                if client.hs_state.magic != EXPECTED_MAGIC {
+                if client.buffer != EXPECTED_MAGIC {
                     self.client_disconnected(token, "invalid client");
                     return false;
                 }
+
+                client.buffer.drain(..);
 
                 if let Err(err) = client.stream.write_all(EXPECTED_MAGIC) {
                     self.client_disconnected(token, &err.to_string());

@@ -65,7 +65,7 @@ pub fn receive_message(stream: &mut TcpStream) -> io::Result<(i64, Message)> {
             &buf,
             bincode::config::standard()
         )
-        .unwrap();
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
 
     Ok((timestamp, decoded))
 }

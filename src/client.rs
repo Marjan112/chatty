@@ -2,7 +2,7 @@ use std::{
     error::Error,
     io::{self, stdin, Read, Write},
     net::{TcpStream, ToSocketAddrs},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}},
     thread,
     time::{Duration, Instant},
     fmt,
@@ -48,7 +48,7 @@ fn color_index_from_name(name: &str) -> usize {
     (hash as usize) % NAME_COLORS.len()
 }
 
-pub fn receive_message(stream: &mut TcpStream) -> io::Result<(i64, Message)> {
+fn receive_message(stream: &mut TcpStream) -> io::Result<(i64, Message)> {
     let mut timestamp_buf = [0u8; 8];
     stream.read_exact(&mut timestamp_buf)?;
     let timestamp = i64::from_le_bytes(timestamp_buf);
@@ -60,23 +60,20 @@ pub fn receive_message(stream: &mut TcpStream) -> io::Result<(i64, Message)> {
     let mut buf = vec![0u8; len as usize];
     stream.read_exact(&mut buf)?;
 
-    let (decoded, _): (Message, usize) =
-        bincode::decode_from_slice(
-            &buf,
-            bincode::config::standard()
-        )
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let decoded =
+        bincode::decode_from_slice(&buf, bincode::config::standard())
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
+        .0;
 
     Ok((timestamp, decoded))
 }
 
-fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>, name: String) {
-    let mut stream_clone = stream.try_clone().unwrap();
+fn receive_messages(mut stream: TcpStream, shared: Arc<Shared>) {
     thread::spawn(move || {
-        loop {
-            match receive_message(&mut stream_clone) {
+        while !shared.exit.load(Ordering::SeqCst) {
+            match receive_message(&mut stream) {
                 Ok((timestamp_secs, message)) => {
-                    let mut messages = messages.lock().unwrap();
+                    let mut messages = shared.messages.lock().unwrap();
                     let datetime = datetime_from_timestamp(timestamp_secs).to_string();
                     match message {
                         Message::ClientConnected {client_name} => {
@@ -115,8 +112,13 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>
                             }
                         }
                         Message::ClientKicked {client_name, reason} => {
-                            if client_name == name {
-                                messages.push(format!("INFO: You are kicked from the server (reason: {reason})").into());
+                            if client_name == shared.name {
+                                shared.after_disconnect_messages
+                                    .lock()
+                                    .unwrap()
+                                    .push(format!("INFO: You are kicked from the server (reason: {reason})").into());
+
+                                shared.exit.store(true, Ordering::SeqCst);
                             }
                         }
                         _ => {}
@@ -126,14 +128,16 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>
                     if err.kind() == io::ErrorKind::WouldBlock
                         || err.kind() == io::ErrorKind::TimedOut => continue,
                 Err(err) => {
-                    let mut messages = messages.lock().unwrap();
+                    let mut after_disconnect_messages = shared.after_disconnect_messages.lock().unwrap();
+
                     match err.kind() {
                         io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset => {
-                            messages.push(format!("INFO: Server closed the connection").into());
+                            after_disconnect_messages.push(String::from("INFO: Server closed the connection"));
                         }
-                        _ => messages.push(format!("ERROR: {err}").into())
+                        _ => after_disconnect_messages.push(format!("ERROR: {err}").into())
                     }
-                    break;
+
+                    shared.exit.store(true, Ordering::SeqCst);
                 }
             }
         }
@@ -141,19 +145,19 @@ fn receive_messages(stream: &TcpStream, messages: Arc<Mutex<Vec<Line<'static>>>>
 }
 
 fn clear_command(app: &mut App) {
-    let mut messages = app.messages.lock().unwrap();
+    let mut messages = app.shared.messages.lock().unwrap();
     messages.clear();
 }
 
 fn list_command(app: &mut App) {
-    let mut messages = app.messages.lock().unwrap();
+    let mut messages = app.shared.messages.lock().unwrap();
     if let Err(err) = send_message(&mut app.stream, Message::GetClientList, None) {
         messages.push(format!("list: failed to get client list: {err}").into());
     }
 }
 
 fn help_command(app: &mut App) {
-    let mut messages = app.messages.lock().unwrap();
+    let mut messages = app.shared.messages.lock().unwrap();
 
     messages.push(Line::from("Help:"));
 
@@ -196,27 +200,17 @@ fn find_command(name: &str) -> Option<&Command> {
         .find(|command| command.name == name)
 }
 
-struct App {
-    exit: bool,
-    input_box: TextArea<'static>,
-    messages: Arc<Mutex<Vec<Line<'static>>>>,
-    vertical_scroll_state: ScrollbarState,
-    vertical_scroll: usize,
-    last_tick: Instant,
-    max_scroll: usize,
-    auto_scroll: bool,
-    name: String,
-    stream: TcpStream
+struct Shared {
+    messages: Mutex<Vec<Line<'static>>>,
+    after_disconnect_messages: Mutex<Vec<String>>,
+    exit: AtomicBool,
+    name: String
 }
 
-impl App {
-    const TICK_RATE: Duration = Duration::from_millis(250);
-
-    fn new(client_name: &str, stream: TcpStream) -> Self {
+impl Shared {
+    fn new(name: String) -> Self {
         Self {
-            exit: false,
-            input_box: TextArea::default(),
-            messages: Arc::new(Mutex::new(
+            messages: Mutex::new(
                 vec![
                     Line::from(vec![
                         "Welcome to ".into(),
@@ -242,14 +236,38 @@ impl App {
                         " to exit".into()
                     ])
                 ]
-            )),
+            ),
+            after_disconnect_messages: Mutex::new(Vec::new()),
+            exit: AtomicBool::new(false),
+            name: name
+        }
+    }
+}
+
+struct App {
+    input_box: TextArea<'static>,
+    vertical_scroll_state: ScrollbarState,
+    vertical_scroll: usize,
+    last_tick: Instant,
+    max_scroll: usize,
+    auto_scroll: bool,
+    stream: TcpStream,
+    shared: Arc<Shared>
+}
+
+impl App {
+    const TICK_RATE: Duration = Duration::from_millis(250);
+
+    fn new(name: &str, stream: TcpStream) -> Self {
+        Self {
+            input_box: TextArea::default(),
             vertical_scroll_state: ScrollbarState::default(),
             vertical_scroll: 0,
             last_tick: Instant::now(),
             max_scroll: 0,
             auto_scroll: true,
-            name: client_name.to_string(),
-            stream: stream
+            stream: stream,
+            shared: Arc::new(Shared::new(name.to_string()))
         }
     }
 
@@ -259,7 +277,7 @@ impl App {
             if let Event::Key(key) = event::read()? {
                 let input = Input::from(key);
                 match input.key {
-                    Key::Esc => self.exit = true,
+                    Key::Esc => self.shared.exit.store(true, Ordering::SeqCst),
                     Key::Enter => {
                         let input = self.input_box.lines().join("\n");
                         let line = input.trim();
@@ -274,7 +292,7 @@ impl App {
                             if let Some(cmd) = find_command(cmd_name) {
                                 (cmd.run)(self);
                             } else {
-                                let mut messages = self.messages.lock().unwrap();
+                                let mut messages = self.shared.messages.lock().unwrap();
                                 messages.push(format!("CMD: Unknown command {cmd_name}").into());
                             }
 
@@ -291,13 +309,13 @@ impl App {
 
                         let timestamp_secs = chrono::Local::now().timestamp();
 
-                        let mut messages = self.messages.lock().unwrap();
+                        let mut messages = self.shared.messages.lock().unwrap();
 
                         if let Err(err) = send_message(&mut self.stream, message, Some(timestamp_secs)) {
                             messages.push(format!("ERROR: Failed to send message: {err}").into());
                         } else {
                             let datetime = datetime_from_timestamp(timestamp_secs);
-                            let client_name = &self.name;
+                            let client_name = &self.shared.name;
                             messages.push(format!("{datetime} {client_name}: {line}").into());
                         }
 
@@ -317,9 +335,9 @@ impl App {
     }
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<(), Box<dyn Error>> {
-        receive_messages(&self.stream, self.messages.clone(), self.name.clone());
+        receive_messages(self.stream.try_clone()?, self.shared.clone());
 
-        while !self.exit {
+        while !self.shared.exit.load(Ordering::SeqCst) {
             terminal.draw(|frame| self.draw_ui(frame))?;
             self.handle_events()?;
 
@@ -345,7 +363,7 @@ impl App {
     }
 
     fn draw_chat_window(&mut self, frame: &mut Frame, chat_window_area: Rect) {
-        let messages = self.messages.lock().unwrap();
+        let messages = self.shared.messages.lock().unwrap();
 
         let block = Block::default()
             .title(" ChaTTY ".yellow())
@@ -505,7 +523,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
 
     let mut terminal = ratatui::init();
-    let app_result = App::new(name_trimmed, stream).run(&mut terminal);
+    let mut app = App::new(name_trimmed, stream);
+    let app_result = app.run(&mut terminal);
+
     ratatui::restore();
+
+    for msg in app.shared.after_disconnect_messages.lock().unwrap().iter() {
+        println!("{msg}");
+    }
+
     app_result
 }

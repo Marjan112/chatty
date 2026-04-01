@@ -116,7 +116,7 @@ fn receive_messages(mut stream: TcpStream, shared: Arc<Shared>) {
                                 shared.after_disconnect_messages
                                     .lock()
                                     .unwrap()
-                                    .push(format!("INFO: You are kicked from the server (reason: {reason})").into());
+                                    .push(format!("INFO: You are kicked from the server (reason: {reason})"));
 
                                 shared.exit.store(true, Ordering::SeqCst);
                             }
@@ -134,7 +134,7 @@ fn receive_messages(mut stream: TcpStream, shared: Arc<Shared>) {
                         io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset => {
                             after_disconnect_messages.push(String::from("INFO: Server closed the connection"));
                         }
-                        _ => after_disconnect_messages.push(format!("ERROR: {err}").into())
+                        _ => after_disconnect_messages.push(format!("ERROR: {err}"))
                     }
 
                     shared.exit.store(true, Ordering::SeqCst);
@@ -239,7 +239,7 @@ impl Shared {
             ),
             after_disconnect_messages: Mutex::new(Vec::new()),
             exit: AtomicBool::new(false),
-            name: name
+            name
         }
     }
 }
@@ -266,7 +266,7 @@ impl App {
             last_tick: Instant::now(),
             max_scroll: 0,
             auto_scroll: true,
-            stream: stream,
+            stream,
             shared: Arc::new(Shared::new(name.to_string()))
         }
     }
@@ -286,9 +286,7 @@ impl App {
                             return Ok(());
                         }
 
-                        if line.starts_with("/") {
-                            let cmd_name = &line[1..];
-
+                        if let Some(cmd_name) = line.strip_prefix("/") {
                             if let Some(cmd) = find_command(cmd_name) {
                                 (cmd.run)(self);
                             } else {
@@ -479,9 +477,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let server_address_trimmed = server_address.trim();
 
-    let server_sock_addr = server_address_trimmed.to_socket_addrs().map_err(|err| {
-        eprintln!("ERROR: Failed to resolve address {server_address_trimmed}");
-        err
+    let server_sock_addr = server_address_trimmed.to_socket_addrs().inspect_err(|err| {
+        eprintln!("ERROR: Failed to resolve address {server_address_trimmed}: {err}");
     })?.find(|a| a.is_ipv4()).unwrap();
 
     let mut stream = TcpStream::connect_timeout(&server_sock_addr, Duration::from_secs(20)).map_err(|err| {
@@ -489,20 +486,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         err
     })?;
 
-    stream.set_read_timeout(Some(Duration::from_secs(20))).map_err(|err| {
+    stream.set_read_timeout(Some(Duration::from_secs(20))).inspect_err(|err| {
         eprintln!("ERROR: Failed to set read timeout: {err}");
-        err
     })?;
-    stream.set_write_timeout(Some(Duration::from_secs(20))).map_err(|err| {
+    stream.set_write_timeout(Some(Duration::from_secs(20))).inspect_err(|err| {
         eprintln!("ERROR: Failed to set write timeout: {err}");
-        err
     })?;
 
     println!("INFO: Connected to {server_sock_addr}");
     println!("INFO: Initiating a handshake...");
-    init_handshake(&mut stream).map_err(|err| {
+    init_handshake(&mut stream).inspect_err(|err| {
         eprintln!("ERROR: Handshake failed: {err}");
-        err
     })?;
 
     println!("Enter your name:");
@@ -517,9 +511,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let connect_message = Message::ClientConnected {
         client_name: name_trimmed.to_string(),
     };
-    send_message(&mut stream, connect_message, None).map_err(|err| {
+    send_message(&mut stream, connect_message, None).inspect_err(|err| {
         eprintln!("ERROR: Failed to send your name to the server: {err}");
-        err
     })?;
 
     let mut terminal = ratatui::init();

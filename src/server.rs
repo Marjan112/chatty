@@ -40,33 +40,31 @@ impl Client {
             Err(err) => return Err(err)
         }
 
-        loop {
-            if self.buffer.len() < 8 {
-                return Ok(None);
-            }
-            let timestamp = i64::from_le_bytes(self.buffer[0..8].try_into().unwrap());
-
-            if self.buffer.len() < 12 {
-                return Ok(None);
-            }
-            let len = u32::from_le_bytes(self.buffer[8..12].try_into().unwrap()) as usize;
-
-            if self.buffer.len() < 12 + len {
-                return Ok(None);
-            }
-
-            let msg_bytes = self.buffer[12..(12 + len)].to_vec();
-            self.buffer.drain(0..(12 + len));
-
-            let (msg, _): (Message, usize) =
-                bincode::decode_from_slice(
-                    &msg_bytes,
-                    bincode::config::standard()
-                )
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-
-            return Ok(Some((timestamp, msg)));
+        if self.buffer.len() < 8 {
+            return Ok(None);
         }
+        let timestamp = i64::from_le_bytes(self.buffer[0..8].try_into().unwrap());
+
+        if self.buffer.len() < 12 {
+            return Ok(None);
+        }
+        let len = u32::from_le_bytes(self.buffer[8..12].try_into().unwrap()) as usize;
+
+        if self.buffer.len() < 12 + len {
+            return Ok(None);
+        }
+
+        let msg_bytes = self.buffer[12..(12 + len)].to_vec();
+        self.buffer.drain(0..(12 + len));
+
+        let (msg, _): (Message, usize) =
+            bincode::decode_from_slice(
+                &msg_bytes,
+                bincode::config::standard()
+            )
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+
+        Ok(Some((timestamp, msg)))
     }
 }
 
@@ -96,8 +94,8 @@ impl Server {
         })?;
 
         Ok(Self {
-            listener: listener,
-            poll: poll,
+            listener,
+            poll,
             clients: HashMap::new(),
             messages: Vec::new(),
         })
@@ -139,7 +137,7 @@ impl Server {
     fn client_incoming(&mut self, stream: TcpStream, addr: SocketAddr, token: Token) {
         println!("INFO: Incoming connection from {addr}");
         self.clients.insert(token, Client {
-            stream: stream,
+            stream,
             name: String::new(),
             buffer: Vec::new(),
             hs_state: HandshakeState::default()
@@ -151,10 +149,7 @@ impl Server {
             let client_name = client.name.clone();
             println!("INFO: ({}) '{}' says: {}", datetime_from_timestamp(timestamp_secs), client_name, msg);
 
-            let broadcast_msg = Message::ClientMessage {
-                client_name: client_name,
-                msg: msg
-            };
+            let broadcast_msg = Message::ClientMessage {client_name, msg};
 
             let recipients: Vec<Token> = self.clients
                 .keys()
@@ -173,14 +168,14 @@ impl Server {
     }
 
     fn server_broadcast(&mut self, msg: Message, timestamp_secs: i64) {
-        for (_, client) in &mut self.clients {
+        for client in self.clients.values_mut() {
             let _ = send_message(&mut client.stream, msg.clone(), Some(timestamp_secs));
         }
         self.messages.push((timestamp_secs, msg));
     }
 
     fn client_disconnected(&mut self, token: &Token, reason: &str) {
-        if let Some(mut client) = self.clients.remove(&token) {
+        if let Some(mut client) = self.clients.remove(token) {
             if client.name.is_empty() {
                 match client.stream.peer_addr() {
                     Ok(addr) => println!("INFO: {addr} disconnected prematurely (reason: {reason})"),
@@ -221,7 +216,7 @@ impl Server {
     }
 
     fn client_connected(&mut self, token: &Token, timestamp_secs: i64, client_name: String) {
-        if self.clients.iter().find(|(_, c)| { c.name == client_name }).is_some() {
+        if self.clients.iter().any(|(_, c)| { c.name == client_name }) {
             self.kick_client(token, client_name, KickReason::NameTaken);
             return;
         }
@@ -232,15 +227,10 @@ impl Server {
             println!("INFO: '{}' connected at {}", client.name, datetime_from_timestamp(timestamp_secs));
 
             for (timestamp, msg) in &self.messages {
-                let _ = send_message(&mut client.stream, msg.clone(), Some(timestamp.clone()));
+                let _ = send_message(&mut client.stream, msg.clone(), Some(*timestamp));
             }
 
-            self.server_broadcast(
-                Message::ClientConnected {
-                    client_name: client_name
-                },
-                timestamp_secs
-            );
+            self.server_broadcast(Message::ClientConnected { client_name }, timestamp_secs);
         }
     }
 
@@ -253,7 +243,7 @@ impl Server {
                 .collect();
 
         if let Some(client) = self.clients.get_mut(token) {
-            let _ = send_message(&mut client.stream, Message::ClientList { client_names: client_names }, None);
+            let _ = send_message(&mut client.stream, Message::ClientList { client_names }, None);
         }
     }
 
@@ -315,7 +305,7 @@ impl Server {
             return true;
         }
 
-        const EXPECTED_MAGIC: &'static [u8] = b"ChaTTY\0\0";
+        const EXPECTED_MAGIC: &[u8] = b"ChaTTY\0\0";
 
         let mut temp = [0u8; 8];
 
@@ -347,7 +337,7 @@ impl Server {
                 client.hs_state.finished = true;
                 true
             }
-            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return false,
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => false,
             Err(err) => {
                 self.client_disconnected(token, &err.to_string());
                 false

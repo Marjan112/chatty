@@ -28,7 +28,7 @@ pub enum Message {
     },
     ClientMessage {
         client_name: String,
-        msg: String
+        msg: String // `message` is okay but `msg` isnt? this clippy mf be trippin
     },
     GetClientList,
     ClientList {

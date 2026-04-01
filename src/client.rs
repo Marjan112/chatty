@@ -144,26 +144,8 @@ fn receive_messages(mut stream: TcpStream, shared: Arc<Shared>) {
     });
 }
 
-fn clear_command(app: &mut App) {
-    let mut messages = app.shared.messages.lock().unwrap();
-    messages.clear();
-}
-
-fn list_command(app: &mut App) {
-    let mut messages = app.shared.messages.lock().unwrap();
-    if let Err(err) = send_message(&mut app.stream, Message::GetClientList, None) {
-        messages.push(format!("list: failed to get client list: {err}").into());
-    }
-}
-
-fn help_command(app: &mut App) {
-    let mut messages = app.shared.messages.lock().unwrap();
-
-    messages.push(Line::from("Help:"));
-
-    for Command {description, signature, ..} in COMMANDS {
-        messages.push(format!("- {signature} - {description}").into());
-    }
+fn exit_app(app: &mut App) {
+    app.shared.exit.store(true, Ordering::SeqCst);
 }
 
 struct Command {
@@ -175,30 +157,49 @@ struct Command {
 
 const COMMANDS: &[Command] = &[
     Command {
+        name: "help",
+        description: "Helps, duh",
+        signature: "/help",
+        run: |app| {
+            let mut messages = app.shared.messages.lock().unwrap();
+
+            messages.push(Line::from("Help:"));
+
+            for Command {description, signature, ..} in COMMANDS {
+                messages.push(format!("- {signature} - {description}").into());
+            }
+        }
+    },
+    Command {
         name: "clear",
         description: "Clears the chat",
         signature: "/clear",
-        run: clear_command
+        run: |app| app.shared.messages.lock().unwrap().clear()
     },
     Command {
         name: "list",
         description: "Lists the connected clients",
         signature: "/list",
-        run: list_command
+        run: |app| {
+            let mut messages = app.shared.messages.lock().unwrap();
+            if let Err(err) = send_message(&mut app.stream, Message::GetClientList, None) {
+                messages.push(format!("list: failed to get client list: {err}").into());
+            }
+        }
     },
     Command {
-        name: "help",
-        description: "Helps, duh",
-        signature: "/help",
-        run: help_command
+        name: "exit",
+        description: "Exits the app",
+        signature: "/exit",
+        run: exit_app
+    },
+    Command {
+        name: "quit",
+        description: "Does the same as /exit",
+        signature: "/quit",
+        run: exit_app
     }
 ];
-
-fn find_command(name: &str) -> Option<&Command> {
-    COMMANDS
-        .iter()
-        .find(|command| command.name == name)
-}
 
 struct Shared {
     messages: Mutex<Vec<Line<'static>>>,
@@ -287,7 +288,11 @@ impl App {
                         }
 
                         if let Some(cmd_name) = line.strip_prefix("/") {
-                            if let Some(cmd) = find_command(cmd_name) {
+                            if cmd_name.is_empty() {
+                                return Ok(());
+                            }
+
+                            if let Some(cmd) = COMMANDS.iter().find(|cmd| cmd.name == cmd_name) {
                                 (cmd.run)(self);
                             } else {
                                 let mut messages = self.shared.messages.lock().unwrap();

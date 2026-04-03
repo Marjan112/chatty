@@ -16,17 +16,11 @@ use message::*;
 mod env;
 use env::*;
 
-#[derive(Default)]
-struct HandshakeState {
-    read_count: usize,
-    finished: bool
-}
-
 struct Client {
     stream: TcpStream,
     name: String,
     buffer: Vec<u8>,
-    hs_state: HandshakeState
+    handshake_finished: bool
 }
 
 impl Client {
@@ -111,24 +105,32 @@ impl Server {
                 eprintln!("ERROR: Failed to poll: {err}");
                 continue;
             }
-            for token in events.iter().map(|ev| ev.token()) {
+            for event in events.iter() {
+                let token = event.token();
                 match token {
-                    Token(0) => match self.listener.accept() {
-                        Ok((mut stream, addr)) => {
-                            counter += 1;
-                            let client_token = Token(counter);
+                    Token(0) => loop {
+                        match self.listener.accept() {
+                            Ok((mut stream, addr)) => {
+                                counter += 1;
+                                let client_token = Token(counter);
 
-                            match self.poll.registry().register(&mut stream, client_token, Interest::READABLE) {
-                                Ok(_) => self.client_incoming(stream, addr, client_token),
-                                Err(err) => eprintln!("ERROR: Failed to register client in the poll object: {err}")
+                                match self.poll.registry().register(&mut stream, client_token, Interest::READABLE | Interest::WRITABLE) {
+                                    Ok(_) => self.client_incoming(stream, addr, client_token),
+                                    Err(err) => eprintln!("ERROR: Failed to register client in the poll object: {err}")
+                                }
+                            }
+                            Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                            Err(err) => {
+                                eprintln!("ERROR: Failed to accept client: {err}");
+                                break;
                             }
                         }
-                        Err(err) if err.kind() != io::ErrorKind::WouldBlock => {
-                            eprintln!("ERROR: Failed to accept client: {err}");
-                        }
-                        Err(_) => {}
                     },
-                    token => self.client_read(token)
+                    token => {
+                        if event.is_readable() {
+                            self.client_read(token);
+                        }
+                    }
                 }
             }
         }
@@ -140,7 +142,7 @@ impl Server {
             stream,
             name: String::new(),
             buffer: Vec::new(),
-            hs_state: HandshakeState::default()
+            handshake_finished: false
         });
     }
 
@@ -301,48 +303,46 @@ impl Server {
             None => return false,
         };
 
-        if client.hs_state.finished {
+        if client.handshake_finished {
             return true;
         }
 
         const EXPECTED_MAGIC: &[u8] = b"ChaTTY\0\0";
 
-        let mut temp = [0u8; 8];
-
-        match client.stream.read(&mut temp) {
-            Ok(0) => {
-                self.client_disconnected(token, "connection closed");
-                false
-            }
-            Ok(n) => {
-                client.buffer.extend_from_slice(&temp[..n]);
-
-                client.hs_state.read_count += n;
-                if client.hs_state.read_count < 8 {
+        loop {
+            let mut temp = [0u8; 64];
+            match client.stream.read(&mut temp) {
+                Ok(0) => {
+                    self.client_disconnected(token, "connection closed");
                     return false;
                 }
-
-                if client.buffer != EXPECTED_MAGIC {
-                    self.client_disconnected(token, "invalid client");
-                    return false;
-                }
-
-                client.buffer.drain(..);
-
-                if let Err(err) = client.stream.write_all(EXPECTED_MAGIC) {
+                Ok(n) => client.buffer.extend_from_slice(&temp[..n]),
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                Err(err) => {
                     self.client_disconnected(token, &err.to_string());
                     return false;
                 }
-
-                client.hs_state.finished = true;
-                true
-            }
-            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => false,
-            Err(err) => {
-                self.client_disconnected(token, &err.to_string());
-                false
             }
         }
+
+        if client.buffer.len() < 8 {
+            return false;
+        }
+
+        if client.buffer[..8] != *EXPECTED_MAGIC {
+            self.client_disconnected(token, "invalid client");
+            return false;
+        }
+
+        client.buffer.drain(..8);
+
+        if let Err(err) = client.stream.write_all(EXPECTED_MAGIC) {
+            self.client_disconnected(token, &err.to_string());
+            return false;
+        }
+
+        client.handshake_finished = true;
+        true
     }
 }
 

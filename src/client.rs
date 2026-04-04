@@ -108,11 +108,11 @@ fn receive_messages(mut stream: TcpStream, shared: Arc<Shared>) {
 
                             for client_name in client_names {
                                 let client_name_color = NAME_COLORS[color_index_from_name(&client_name)];
-                                messages.push(Line::styled(format!("- {client_name}"), Style::default().fg(client_name_color)));
+                                messages.push(Line::styled(format!("• {client_name}"), Style::default().fg(client_name_color)));
                             }
                         }
                         Message::ClientKicked {client_name, reason} => {
-                            if client_name == shared.name {
+                            if client_name == *shared.name.lock().unwrap() {
                                 shared.after_disconnect_messages
                                     .lock()
                                     .unwrap()
@@ -120,6 +120,18 @@ fn receive_messages(mut stream: TcpStream, shared: Arc<Shared>) {
 
                                 shared.exit.store(true, Ordering::SeqCst);
                             }
+                        },
+                        Message::ClientChangedName {old_name, new_name} => {
+                            let old_name_color = NAME_COLORS[color_index_from_name(&old_name)];
+                            let new_name_color = NAME_COLORS[color_index_from_name(&new_name)];
+
+                            messages.push(Line::from(vec![
+                                datetime.into(),
+                                Span::from(" "),
+                                Span::styled(old_name, Style::default().fg(old_name_color)),
+                                Span::from(" changed their name to "),
+                                Span::styled(new_name, Style::default().fg(new_name_color)),
+                            ]));
                         }
                         _ => {}
                     }
@@ -144,7 +156,7 @@ fn receive_messages(mut stream: TcpStream, shared: Arc<Shared>) {
     });
 }
 
-fn exit_app(app: &mut App) {
+fn exit_app(app: &mut App, _: &str) {
     app.shared.exit.store(true, Ordering::SeqCst);
 }
 
@@ -152,7 +164,7 @@ struct Command {
     name: &'static str,
     description: &'static str,
     signature: &'static str,
-    run: fn(&mut App)
+    run: fn(&mut App, &str)
 }
 
 const COMMANDS: &[Command] = &[
@@ -160,13 +172,13 @@ const COMMANDS: &[Command] = &[
         name: "help",
         description: "Helps, duh",
         signature: "/help",
-        run: |app| {
+        run: |app, _| {
             let mut messages = app.shared.messages.lock().unwrap();
 
             messages.push(Line::from("Help:"));
 
             for Command {description, signature, ..} in COMMANDS {
-                messages.push(format!("- {signature} - {description}").into());
+                messages.push(format!("• {signature} - {description}").into());
             }
         }
     },
@@ -174,16 +186,39 @@ const COMMANDS: &[Command] = &[
         name: "clear",
         description: "Clears the chat",
         signature: "/clear",
-        run: |app| app.shared.messages.lock().unwrap().clear()
+        run: |app, _| app.shared.messages.lock().unwrap().clear()
     },
     Command {
         name: "list",
         description: "Lists the connected clients",
         signature: "/list",
-        run: |app| {
+        run: |app, _| {
             let mut messages = app.shared.messages.lock().unwrap();
             if let Err(err) = send_message(&mut app.stream, Message::GetClientList, None) {
                 messages.push(format!("list: failed to get client list: {err}").into());
+            }
+        }
+    },
+    Command {
+        name: "name",
+        description: "Change your display name",
+        signature: "/name <new name>",
+        run: |app, new_name| {
+            let mut messages = app.shared.messages.lock().unwrap();
+            let mut name = app.shared.name.lock().unwrap();
+
+            if new_name == *name {
+                messages.push(format!("name: your display name is already {new_name}").into());
+                return;
+            }
+
+            let old_name = name.clone();
+
+            *name = new_name.to_string();
+
+            if let Err(err) = send_message(&mut app.stream, Message::ClientWantNewName { new_name: new_name.to_string() }, None) {
+                messages.push(format!("name: failed to change your display name: {err}").into());
+                *name = old_name;
             }
         }
     },
@@ -205,7 +240,7 @@ struct Shared {
     messages: Mutex<Vec<Line<'static>>>,
     after_disconnect_messages: Mutex<Vec<String>>,
     exit: AtomicBool,
-    name: String
+    name: Mutex<String>
 }
 
 impl Shared {
@@ -232,6 +267,11 @@ impl Shared {
                         " to send".into()
                     ]),
                     Line::from(vec![
+                        "Type ".into(),
+                        "/help".yellow(),
+                        " for help".into()
+                    ]),
+                    Line::from(vec![
                         "Press ".into(),
                         "ESC".yellow(),
                         " to exit".into()
@@ -240,7 +280,7 @@ impl Shared {
             ),
             after_disconnect_messages: Mutex::new(Vec::new()),
             exit: AtomicBool::new(false),
-            name
+            name: Mutex::new(name)
         }
     }
 }
@@ -287,16 +327,15 @@ impl App {
                             return Ok(());
                         }
 
-                        if let Some(cmd_name) = line.strip_prefix("/") {
-                            if cmd_name.is_empty() {
-                                return Ok(());
-                            }
+                        if let Some(cmd) = line.strip_prefix("/") {
+                            let cmd_name = cmd.split_whitespace().next().unwrap_or("");
+                            let args = cmd.strip_prefix(cmd_name).unwrap_or("").trim();
 
-                            if let Some(cmd) = COMMANDS.iter().find(|cmd| cmd.name == cmd_name) {
-                                (cmd.run)(self);
+                            if let Some(command) = COMMANDS.iter().find(|c| c.name == cmd_name) {
+                                (command.run)(self, args);
                             } else {
                                 let mut messages = self.shared.messages.lock().unwrap();
-                                messages.push(format!("CMD: Unknown command {cmd_name}").into());
+                                messages.push(format!("CMD: Unknown command: {cmd_name}").into());
                             }
 
                             self.input_box.select_all();
@@ -318,7 +357,7 @@ impl App {
                             messages.push(format!("ERROR: Failed to send message: {err}").into());
                         } else {
                             let datetime = datetime_from_timestamp(timestamp_secs);
-                            let client_name = &self.shared.name;
+                            let client_name = &self.shared.name.lock().unwrap();
                             messages.push(format!("{datetime} {client_name}: {line}").into());
                         }
 
@@ -400,7 +439,7 @@ impl App {
     fn draw_input_box(&mut self, frame: &mut Frame, input_box_area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" You: ".reset())
+            .title(format!(" You ({}): ", self.shared.name.lock().unwrap()).reset())
             .fg(Color::Yellow);
 
         self.input_box.set_block(block);

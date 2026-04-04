@@ -255,6 +255,23 @@ impl Server {
         }
     }
 
+    fn client_change_name(&mut self, token: &Token, new_name: String) {
+        let mut old_name = String::new();
+
+        if let Some(client) = self.clients.get_mut(token) {
+            old_name = client.name.clone();
+            client.name = new_name.clone();
+        }
+
+        if let Some(client) = self.clients.get(token) {
+            println!("INFO: '{}' changed their name to '{}'", old_name, client.name);
+        }
+
+        let timestamp_secs = Local::now().timestamp();
+
+        self.server_broadcast(Message::ClientChangedName { old_name, new_name }, timestamp_secs);
+    }
+
     fn client_read_messages(&mut self, token: &Token) {
         let mut read_ops: u32 = 0;
         const READS_PER_TICK: u32 = 32;
@@ -277,6 +294,9 @@ impl Server {
                                 }
                                 Message::GetClientList => {
                                     self.client_send_list(token);
+                                },
+                                Message::ClientWantNewName { new_name } => {
+                                    self.client_change_name(token, new_name);
                                 }
                                 _ => {}
                             }

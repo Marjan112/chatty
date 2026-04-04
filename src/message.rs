@@ -37,6 +37,13 @@ pub enum Message {
     ClientKicked {
         client_name: String,
         reason: KickReason
+    },
+    ClientWantNewName {
+        new_name: String
+    },
+    ClientChangedName {
+        old_name: String,
+        new_name: String
     }
 }
 

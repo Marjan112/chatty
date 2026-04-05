@@ -92,6 +92,7 @@ fn receive_messages(mut stream: TcpStream, shared: Arc<Shared>) {
                         },
                         Message::ClientChangedName {old_name, new_name} => messages.push(format!("{datetime} {old_name} changed their name to {new_name}").into()),
                         Message::ClientAssignedColor { color } => *shared.color.lock().unwrap() = color,
+                        Message::NameTaken => messages.push("color: new name that you requested is already taken by someone else".into()),
                         _ => {}
                     }
                 },
@@ -164,7 +165,7 @@ const COMMANDS: &[Command] = &[
         signature: "/name <new name>",
         run: |app, new_name| {
             let mut messages = app.shared.messages.lock().unwrap();
-            let mut current_name = app.shared.name.lock().unwrap();
+            let current_name = app.shared.name.lock().unwrap();
 
             if new_name.is_empty() {
                 messages.push("usage: /name <new name>".into());
@@ -176,13 +177,8 @@ const COMMANDS: &[Command] = &[
                 return;
             }
 
-            let old_name = current_name.clone();
-
-            *current_name = new_name.to_string();
-
             if let Err(err) = send_message(&mut app.stream, Message::ClientWantNewName { new_name: new_name.to_string() }, None) {
                 messages.push(format!("name: failed to change your display name: {err}").into());
-                *current_name = old_name;
             }
         }
     },

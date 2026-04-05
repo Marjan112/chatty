@@ -275,6 +275,12 @@ impl Server {
         self.server_broadcast(Message::ClientConnected { name: client_name, color: client_color }, timestamp_secs);
     }
 
+    fn client_send_message(&mut self, token: &Token, message: Message, timestamp_secs: Option<i64>) {
+        if let Some(client) = self.clients.get_mut(token) {
+            let _ = send_message(&mut client.stream, message, timestamp_secs);
+        }
+    }
+
     fn client_send_list(&mut self, token: &Token) {
         let clients: Vec<(String, ChatColor)> =
             self.clients
@@ -283,9 +289,7 @@ impl Server {
                 .map(|other_client| (other_client.name.clone(), other_client.color))
                 .collect();
 
-        if let Some(client) = self.clients.get_mut(token) {
-            let _ = send_message(&mut client.stream, Message::ClientList { clients }, None);
-        }
+        self.client_send_message(token, Message::ClientList { clients }, None);
     }
 
     fn client_read(&mut self, token: Token) {
@@ -295,6 +299,11 @@ impl Server {
     }
 
     fn client_change_name(&mut self, token: &Token, new_name: String) {
+        if self.clients.iter().any(|(_, client)| client.name == new_name) {
+            self.client_send_message(token, Message::NameTaken, None);
+            return;
+        }
+
         let mut old_name = String::new();
 
         if let Some(client) = self.clients.get_mut(token) {

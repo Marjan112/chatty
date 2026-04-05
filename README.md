@@ -10,9 +10,6 @@ Chat app in the terminal
 
 ### Server
 
-> [!WARNING]
-> The server only works on linux for now.
-
 ```sh
 cargo run --bin chatty_server
 ```

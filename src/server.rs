@@ -7,6 +7,8 @@ use std::{
     error::Error,
     io::{self, Read, Write},
     net::SocketAddr,
+    hash::{Hash, Hasher},
+    collections::hash_map::DefaultHasher
 };
 use chrono::Local;
 
@@ -19,19 +21,52 @@ use env::*;
 struct Client {
     stream: TcpStream,
     name: String,
+    color: ChatColor,
     buffer: Vec<u8>,
     handshake_finished: bool
 }
 
 impl Client {
-    fn receive_message(&mut self) -> io::Result<Option<(i64, Message)>> {
-        let mut temp = [0u8; 1024];
+    const DEFAULT_COLORS: [ChatColor; 11] = [
+        ChatColor::Red,
+        ChatColor::Green,
+        ChatColor::Yellow,
+        ChatColor::Blue,
+        ChatColor::Magenta,
+        ChatColor::Cyan,
+        ChatColor::LightRed,
+        ChatColor::LightGreen,
+        ChatColor::LightYellow,
+        ChatColor::LightBlue,
+        ChatColor::LightMagenta
+    ];
 
-        match self.stream.read(&mut temp) {
-            Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed")),
-            Ok(n) => self.buffer.extend_from_slice(&temp[..n]),
-            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(None),
-            Err(err) => return Err(err)
+    fn send_assigned_color(&mut self) {
+        let mut hasher = DefaultHasher::new();
+        self.name.to_lowercase().hash(&mut hasher);
+        let hash = hasher.finish();
+        let color_index = (hash as usize) % Client::DEFAULT_COLORS.len();
+
+        self.color = Self::DEFAULT_COLORS[color_index];
+        let _ = send_message(&mut self.stream, Message::ClientAssignedColor { color: self.color }, None);
+    }
+
+    fn receive_message(&mut self) -> io::Result<Option<(i64, Message)>> {
+        loop {
+            if self.buffer.len() >= 12 {
+                let len = u32::from_le_bytes(self.buffer[8..12].try_into().unwrap()) as usize;
+                if self.buffer.len() >= 12 + len {
+                    break;
+                }
+            }
+
+            let mut temp = [0u8; 1024];
+            match self.stream.read(&mut temp) {
+                Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed")),
+                Ok(n) => self.buffer.extend_from_slice(&temp[..n]),
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+                Err(err) => return Err(err)
+            }
         }
 
         if self.buffer.len() < 8 {
@@ -49,14 +84,11 @@ impl Client {
         }
 
         let msg_bytes = self.buffer[12..(12 + len)].to_vec();
+
         self.buffer.drain(0..(12 + len));
 
-        let (msg, _): (Message, usize) =
-            bincode::decode_from_slice(
-                &msg_bytes,
-                bincode::config::standard()
-            )
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        let msg = postcard::from_bytes(&msg_bytes)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("failed to deserialize message: {err}")))?;
 
         Ok(Some((timestamp, msg)))
     }
@@ -141,6 +173,7 @@ impl Server {
         self.clients.insert(token, Client {
             stream,
             name: String::new(),
+            color: ChatColor::Reset,
             buffer: Vec::new(),
             handshake_finished: false
         });
@@ -151,7 +184,7 @@ impl Server {
             let client_name = client.name.clone();
             println!("INFO: ({}) '{}' says: {}", datetime_from_timestamp(timestamp_secs), client_name, msg);
 
-            let broadcast_msg = Message::ClientMessage {client_name, msg};
+            let broadcast_msg = Message::ClientMessage {name: client_name, color: client.color, msg};
 
             let recipients: Vec<Token> = self.clients
                 .keys()
@@ -187,7 +220,8 @@ impl Server {
                 let timestamp_secs = Local::now().timestamp();
 
                 let disconn_msg = Message::ClientDisconnected {
-                    client_name: client.name.clone(),
+                    name: client.name.clone(),
+                    color: client.color,
                     reason: reason.to_string()
                 };
 
@@ -209,7 +243,7 @@ impl Server {
                 Err(err) => eprintln!("ERROR: Failed to get address of the kicked client: {err}")
             }
 
-            let _ = send_message(&mut client.stream, Message::ClientKicked {client_name, reason}, None);
+            let _ = send_message(&mut client.stream, Message::ClientKicked {name: client_name, reason}, None);
 
             if let Err(err) = self.poll.registry().deregister(&mut client.stream) {
                 eprintln!("ERROR: Failed to deregister client '{}' from the poll object: {}", client.name, err);
@@ -223,29 +257,34 @@ impl Server {
             return;
         }
 
+        let mut client_color = ChatColor::Reset;
+
         if let Some(client) = self.clients.get_mut(token) {
             client.name = client_name.clone();
 
             println!("INFO: '{}' connected at {}", client.name, datetime_from_timestamp(timestamp_secs));
 
+            client.send_assigned_color();
+            client_color = client.color;
+
             for (timestamp, msg) in &self.messages {
                 let _ = send_message(&mut client.stream, msg.clone(), Some(*timestamp));
             }
-
-            self.server_broadcast(Message::ClientConnected { client_name }, timestamp_secs);
         }
+
+        self.server_broadcast(Message::ClientConnected { name: client_name, color: client_color }, timestamp_secs);
     }
 
     fn client_send_list(&mut self, token: &Token) {
-        let client_names: Vec<String> =
+        let clients: Vec<(String, ChatColor)> =
             self.clients
                 .values()
                 .filter(|other_client| !other_client.name.is_empty())
-                .map(|other_client| other_client.name.clone())
+                .map(|other_client| (other_client.name.clone(), other_client.color))
                 .collect();
 
         if let Some(client) = self.clients.get_mut(token) {
-            let _ = send_message(&mut client.stream, Message::ClientList { client_names }, None);
+            let _ = send_message(&mut client.stream, Message::ClientList { clients }, None);
         }
     }
 
@@ -272,6 +311,12 @@ impl Server {
         self.server_broadcast(Message::ClientChangedName { old_name, new_name }, timestamp_secs);
     }
 
+    fn client_change_color(&mut self, token: &Token, new_color: ChatColor) {
+        if let Some(client) = self.clients.get_mut(token) {
+            client.color = new_color;
+        }
+    }
+
     fn client_read_messages(&mut self, token: &Token) {
         let mut read_ops: u32 = 0;
         const READS_PER_TICK: u32 = 32;
@@ -286,18 +331,11 @@ impl Server {
                     Ok(timestamp_message) => {
                         if let Some((timestamp_secs, message)) = timestamp_message {
                             match message {
-                                Message::ClientConnected { client_name } => {
-                                    self.client_connected(token, timestamp_secs, client_name);
-                                }
-                                Message::ClientMessage { msg, .. } => {
-                                    self.client_broadcast(token, timestamp_secs, msg);
-                                }
-                                Message::GetClientList => {
-                                    self.client_send_list(token);
-                                },
-                                Message::ClientWantNewName { new_name } => {
-                                    self.client_change_name(token, new_name);
-                                }
+                                Message::ClientConnected { name, .. } => self.client_connected(token, timestamp_secs, name),
+                                Message::ClientMessage { msg, .. } => self.client_broadcast(token, timestamp_secs, msg),
+                                Message::GetClientList => self.client_send_list(token),
+                                Message::ClientWantNewName { new_name } => self.client_change_name(token, new_name),
+                                Message::ClientWantNewColor { new_color } => self.client_change_color(token, new_color),
                                 _ => {}
                             }
                         }
@@ -330,23 +368,23 @@ impl Server {
         const EXPECTED_MAGIC: &[u8] = b"ChaTTY\0\0";
 
         loop {
-            let mut temp = [0u8; 64];
+            if client.buffer.len() >= 8 {
+                break;
+            }
+
+            let mut temp = [0u8; 8];
             match client.stream.read(&mut temp) {
                 Ok(0) => {
                     self.client_disconnected(token, "connection closed");
                     return false;
                 }
                 Ok(n) => client.buffer.extend_from_slice(&temp[..n]),
-                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return false,
                 Err(err) => {
                     self.client_disconnected(token, &err.to_string());
                     return false;
                 }
             }
-        }
-
-        if client.buffer.len() < 8 {
-            return false;
         }
 
         if client.buffer[..8] != *EXPECTED_MAGIC {

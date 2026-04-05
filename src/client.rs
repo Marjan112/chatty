@@ -6,8 +6,6 @@ use std::{
     thread,
     time::{Duration, Instant},
     fmt,
-    hash::{Hash, Hasher},
-    collections::hash_map::DefaultHasher
 };
 use ratatui::{
     crossterm::event::{self, Event},
@@ -26,28 +24,6 @@ use message::*;
 mod env;
 use env::*;
 
-const NAME_COLORS: &[Color] = &[
-    Color::Red,
-    Color::Green,
-    Color::Yellow,
-    Color::Blue,
-    Color::Magenta,
-    Color::Cyan,
-    Color::LightRed,
-    Color::LightGreen,
-    Color::LightYellow,
-    Color::LightBlue,
-    Color::LightMagenta
-];
-
-fn color_index_from_name(name: &str) -> usize {
-    let mut hasher = DefaultHasher::new();
-    name.to_lowercase().hash(&mut hasher);
-    let hash = hasher.finish();
-
-    (hash as usize) % NAME_COLORS.len()
-}
-
 fn receive_message(stream: &mut TcpStream) -> io::Result<(i64, Message)> {
     let mut timestamp_buf = [0u8; 8];
     stream.read_exact(&mut timestamp_buf)?;
@@ -60,10 +36,7 @@ fn receive_message(stream: &mut TcpStream) -> io::Result<(i64, Message)> {
     let mut buf = vec![0u8; len as usize];
     stream.read_exact(&mut buf)?;
 
-    let decoded =
-        bincode::decode_from_slice(&buf, bincode::config::standard())
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
-        .0;
+    let decoded = postcard::from_bytes(&buf).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
 
     Ok((timestamp, decoded))
 }
@@ -76,43 +49,39 @@ fn receive_messages(mut stream: TcpStream, shared: Arc<Shared>) {
                     let mut messages = shared.messages.lock().unwrap();
                     let datetime = datetime_from_timestamp(timestamp_secs).to_string();
                     match message {
-                        Message::ClientConnected {client_name} => {
-                            let client_name_color = NAME_COLORS[color_index_from_name(&client_name)];
+                        Message::ClientConnected {name, color} => {
                             messages.push(Line::from(vec![
                                 datetime.into(),
                                 Span::from(" "),
-                                Span::styled(client_name, Style::default().fg(client_name_color)),
+                                Span::styled(name, Style::default().fg(color.into())),
                                 Span::from(" connected"),
                             ]));
                         }
-                        Message::ClientDisconnected {client_name, reason} => {
-                            let client_name_color = NAME_COLORS[color_index_from_name(&client_name)];
+                        Message::ClientDisconnected {name, color, reason} => {
                             messages.push(Line::from(vec![
                                 datetime.into(),
                                 Span::from(" "),
-                                Span::styled(client_name, Style::default().fg(client_name_color)),
+                                Span::styled(name, Style::default().fg(color.into())),
                                 format!(" disconnected (reason: {reason})").into()
                             ]));
                         }
-                        Message::ClientMessage {client_name, msg} => {
-                            let client_name_color = NAME_COLORS[color_index_from_name(&client_name)];
+                        Message::ClientMessage {name, color, msg} => {
                             messages.push(Line::from(vec![
                                 datetime.into(),
                                 Span::from(" "),
-                                Span::styled(client_name, Style::default().fg(client_name_color)),
+                                Span::styled(name, Style::default().fg(color.into())),
                                 format!(": {msg}").into()
                             ]));
                         }
-                        Message::ClientList { client_names } => {
+                        Message::ClientList { clients } => {
                             messages.push(Line::from("Connected clients:"));
 
-                            for client_name in client_names {
-                                let client_name_color = NAME_COLORS[color_index_from_name(&client_name)];
-                                messages.push(Line::styled(format!("• {client_name}"), Style::default().fg(client_name_color)));
+                            for (name, color) in clients {
+                                messages.push(Line::styled(format!("• {name}"), Style::default().fg(color.into())));
                             }
                         }
-                        Message::ClientKicked {client_name, reason} => {
-                            if client_name == *shared.name.lock().unwrap() {
+                        Message::ClientKicked {name, reason} => {
+                            if name == *shared.name.lock().unwrap() {
                                 shared.after_disconnect_messages
                                     .lock()
                                     .unwrap()
@@ -121,18 +90,8 @@ fn receive_messages(mut stream: TcpStream, shared: Arc<Shared>) {
                                 shared.exit.store(true, Ordering::SeqCst);
                             }
                         },
-                        Message::ClientChangedName {old_name, new_name} => {
-                            let old_name_color = NAME_COLORS[color_index_from_name(&old_name)];
-                            let new_name_color = NAME_COLORS[color_index_from_name(&new_name)];
-
-                            messages.push(Line::from(vec![
-                                datetime.into(),
-                                Span::from(" "),
-                                Span::styled(old_name, Style::default().fg(old_name_color)),
-                                Span::from(" changed their name to "),
-                                Span::styled(new_name, Style::default().fg(new_name_color)),
-                            ]));
-                        }
+                        Message::ClientChangedName {old_name, new_name} => messages.push(format!("{datetime} {old_name} changed their name to {new_name}").into()),
+                        Message::ClientAssignedColor { color } => *shared.color.lock().unwrap() = color,
                         _ => {}
                     }
                 },
@@ -205,20 +164,66 @@ const COMMANDS: &[Command] = &[
         signature: "/name <new name>",
         run: |app, new_name| {
             let mut messages = app.shared.messages.lock().unwrap();
-            let mut name = app.shared.name.lock().unwrap();
+            let mut current_name = app.shared.name.lock().unwrap();
 
-            if new_name == *name {
-                messages.push(format!("name: your display name is already {new_name}").into());
+            if new_name.is_empty() {
+                messages.push("usage: /name <new name>".into());
                 return;
             }
 
-            let old_name = name.clone();
+            if new_name == *current_name {
+                messages.push(format!("name: your display name is already '{new_name}'").into());
+                return;
+            }
 
-            *name = new_name.to_string();
+            let old_name = current_name.clone();
+
+            *current_name = new_name.to_string();
 
             if let Err(err) = send_message(&mut app.stream, Message::ClientWantNewName { new_name: new_name.to_string() }, None) {
                 messages.push(format!("name: failed to change your display name: {err}").into());
-                *name = old_name;
+                *current_name = old_name;
+            }
+        }
+    },
+    Command {
+        name: "color",
+        description: "Change your color",
+        signature: "/color <new color>",
+        run: |app, new_color| {
+            let mut messages = app.shared.messages.lock().unwrap();
+            let mut current_color = app.shared.color.lock().unwrap();
+
+            if new_color.is_empty() {
+                messages.push("usage: /color <new color>".into());
+                return;
+            }
+
+            match new_color.parse::<Color>() {
+                Ok(new_color_parsed) => {
+                    let new_chat_color: ChatColor = new_color_parsed.into();
+
+                    if new_chat_color == *current_color {
+                        messages.push("color: you already have the color that you requested".into());
+                        return;
+                    }
+
+                    let old_color = *current_color;
+
+                    *current_color = new_chat_color;
+
+                    if let Err(err) = send_message(&mut app.stream, Message::ClientWantNewColor { new_color: new_chat_color }, None) {
+                        messages.push(format!("color: failed to change your color: {err}").into());
+                        *current_color = old_color;
+                    }
+
+                    let current_color: Color = current_color.to_owned().into();
+                    messages.push(Line::from(vec![
+                        Span::from("color: changed your color to "),
+                        Span::styled(current_color.to_string(), Style::default().fg(current_color))
+                    ]));
+                }
+                Err(err) => messages.push(format!("color: failed to change your color to '{new_color}': {err}").into())
             }
         }
     },
@@ -240,7 +245,8 @@ struct Shared {
     messages: Mutex<Vec<Line<'static>>>,
     after_disconnect_messages: Mutex<Vec<String>>,
     exit: AtomicBool,
-    name: Mutex<String>
+    name: Mutex<String>,
+    color: Mutex<ChatColor>
 }
 
 impl Shared {
@@ -280,7 +286,8 @@ impl Shared {
             ),
             after_disconnect_messages: Mutex::new(Vec::new()),
             exit: AtomicBool::new(false),
-            name: Mutex::new(name)
+            name: Mutex::new(name),
+            color: Mutex::new(ChatColor::Reset)
         }
     }
 }
@@ -345,7 +352,8 @@ impl App {
                         }
 
                         let message = Message::ClientMessage {
-                            client_name: String::new(),
+                            name: String::new(),
+                            color: ChatColor::Reset,
                             msg: line.to_string(),
                         };
 
@@ -356,9 +364,22 @@ impl App {
                         if let Err(err) = send_message(&mut self.stream, message, Some(timestamp_secs)) {
                             messages.push(format!("ERROR: Failed to send message: {err}").into());
                         } else {
-                            let datetime = datetime_from_timestamp(timestamp_secs);
-                            let client_name = &self.shared.name.lock().unwrap();
-                            messages.push(format!("{datetime} {client_name}: {line}").into());
+                            let datetime = datetime_from_timestamp(timestamp_secs).to_string();
+                            let name = self.shared.name
+                                .lock()
+                                .unwrap()
+                                .to_owned();
+                            let color: Color = self.shared.color
+                                .lock()
+                                .unwrap()
+                                .to_owned()
+                                .into();
+                            messages.push(Line::from(vec![
+                                datetime.into(),
+                                " ".into(),
+                                Span::styled(name, Style::default().fg(color)),
+                                format!(": {line}").into()
+                            ]));
                         }
 
                         self.input_box.select_all();
@@ -437,9 +458,12 @@ impl App {
     }
 
     fn draw_input_box(&mut self, frame: &mut Frame, input_box_area: Rect) {
+        let name = self.shared.name.lock().unwrap().to_owned();
+        let color: Color = self.shared.color.lock().unwrap().to_owned().into();
+
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(format!(" You ({}): ", self.shared.name.lock().unwrap()).reset())
+            .title(vec![" You (".into(), Span::styled(name, Style::default().fg(color)), "): ".into()])
             .fg(Color::Yellow);
 
         self.input_box.set_block(block);
@@ -553,7 +577,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let connect_message = Message::ClientConnected {
-        client_name: name_trimmed.to_string(),
+        name: name_trimmed.to_string(),
+        color: ChatColor::Reset
     };
     send_message(&mut stream, connect_message, None).inspect_err(|err| {
         eprintln!("ERROR: Failed to send your name to the server: {err}");

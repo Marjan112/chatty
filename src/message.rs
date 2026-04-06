@@ -123,7 +123,9 @@ pub enum Message {
     ClientAssignedColor {
         color: ChatColor
     },
-    NameTaken
+    NameTaken {
+        old_name: String
+    }
 }
 
 // i know this function doesnt have to do anything with the message protocol stuff and that it

@@ -299,9 +299,11 @@ impl Server {
     }
 
     fn client_change_name(&mut self, token: &Token, new_name: String) {
-        if self.clients.iter().any(|(_, client)| client.name == new_name) {
-            self.client_send_message(token, Message::NameTaken, None);
-            return;
+        if let Some(client) = self.clients.get(token) {
+            if self.clients.iter().any(|(_, other_client)| other_client.name == new_name) {
+                self.client_send_message(token, Message::NameTaken {old_name: client.name.clone()}, None);
+                return;
+            }
         }
 
         let mut old_name = String::new();
@@ -309,9 +311,6 @@ impl Server {
         if let Some(client) = self.clients.get_mut(token) {
             old_name = client.name.clone();
             client.name = new_name.clone();
-        }
-
-        if let Some(client) = self.clients.get(token) {
             println!("INFO: '{}' changed their name to '{}'", old_name, client.name);
         }
 

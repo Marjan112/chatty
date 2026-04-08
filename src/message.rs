@@ -1,9 +1,10 @@
 #![allow(dead_code)]
 
-use std::{io::{self, Write}, fmt};
+use std::{io::{self, Write, Read}, fmt};
 use chrono::{format::{DelayedFormat, StrftimeItems}, Local, TimeZone};
 use serde::{Serialize, Deserialize};
-use ratatui::style::Color;
+
+use crate::ChatColor;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub enum KickReason {
@@ -15,74 +16,6 @@ impl fmt::Display for KickReason {
         match self {
             Self::NameTaken => write!(f, "Name was already taken")
         }
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
-pub enum ChatColor {
-    // The default colors
-    Reset,
-    Red,
-    Green,
-    Yellow,
-    Blue,
-    Magenta,
-    Cyan,
-    LightRed,
-    LightGreen,
-    LightYellow,
-    LightBlue,
-    LightMagenta,
-
-    // Any RGB color
-    Rgb(u8, u8, u8)
-}
-
-impl From<ChatColor> for Color {
-    fn from(chat_color: ChatColor) -> Self {
-        match chat_color {
-            ChatColor::Reset => Color::Reset,
-            ChatColor::Red => Color::Red,
-            ChatColor::Green => Color::Green,
-            ChatColor::Yellow => Color::Yellow,
-            ChatColor::Blue => Color::Blue,
-            ChatColor::Magenta => Color::Magenta,
-            ChatColor::Cyan => Color::Cyan,
-            ChatColor::LightRed => Color::LightRed,
-            ChatColor::LightGreen => Color::LightGreen,
-            ChatColor::LightYellow => Color::LightYellow,
-            ChatColor::LightBlue => Color::LightBlue,
-            ChatColor::LightMagenta => Color::LightMagenta,
-            ChatColor::Rgb(r, g, b) => Color::Rgb(r, g, b)
-        }
-    }
-}
-
-impl From<Color> for ChatColor {
-    fn from(color: Color) -> Self {
-        match color {
-            Color::Reset => ChatColor::Reset,
-            Color::Red => ChatColor::Red,
-            Color::Green => ChatColor::Green,
-            Color::Yellow => ChatColor::Yellow,
-            Color::Blue => ChatColor::Blue,
-            Color::Magenta => ChatColor::Magenta,
-            Color::Cyan => ChatColor::Cyan,
-            Color::LightRed => ChatColor::LightRed,
-            Color::LightGreen => ChatColor::LightGreen,
-            Color::LightYellow => ChatColor::LightYellow,
-            Color::LightBlue => ChatColor::LightBlue,
-            Color::LightMagenta => ChatColor::LightMagenta,
-            Color::Rgb(r, g, b) => ChatColor::Rgb(r, g, b),
-            _ => ChatColor::Reset
-        }
-    }
-}
-
-impl fmt::Display for ChatColor {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let color: Color = (*self).into();
-        write!(f, "{}", color)
     }
 }
 
@@ -153,4 +86,46 @@ pub fn send_message<T: Write>(stream: &mut T, message: Message, timestamp_secs: 
     stream.write_all(&encoded)?;
 
     Ok(())
+}
+
+pub fn receive_message<T: Read>(stream: &mut T, buffer: &mut Vec<u8>) -> io::Result<Option<(i64, Message)>> {
+    loop {
+        if buffer.len() >= 12 {
+            let len = u32::from_le_bytes(buffer[8..12].try_into().unwrap()) as usize;
+            if buffer.len() >= 12 + len {
+                break;
+            }
+        }
+
+        let mut temp = [0u8; 1024];
+        match stream.read(&mut temp) {
+            Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed")),
+            Ok(n) => buffer.extend_from_slice(&temp[..n]),
+            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+            Err(err) => return Err(err)
+        }
+    }
+
+    if buffer.len() < 8 {
+        return Ok(None);
+    }
+    let timestamp = i64::from_le_bytes(buffer[0..8].try_into().unwrap());
+
+    if buffer.len() < 12 {
+        return Ok(None);
+    }
+    let len = u32::from_le_bytes(buffer[8..12].try_into().unwrap()) as usize;
+
+    if buffer.len() < 12 + len {
+        return Ok(None);
+    }
+
+    let msg_bytes = buffer[12..(12 + len)].to_vec();
+
+    buffer.drain(0..(12 + len));
+
+    let msg = postcard::from_bytes(&msg_bytes)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("failed to deserialize message: {err}")))?;
+        
+    Ok(Some((timestamp, msg)))
 }

@@ -2,122 +2,37 @@ use std::{
     error::Error,
     io::{self, stdin, Read, Write},
     net::{TcpStream, ToSocketAddrs},
-    sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}},
-    thread,
+    sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
-    fmt,
 };
 use ratatui::{
     crossterm::event::{self, Event},
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Style, Stylize},
+    style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     DefaultTerminal,
-    Frame,
 };
-use tui_textarea::{Input, Key, TextArea};
+use tui_textarea::{Input, Key};
+
+mod chat_color;
+use chat_color::*;
 
 mod message;
 use message::*;
 
+mod net;
+use net::*;
+
+mod shared;
+use shared::*;
+
 mod env;
 use env::*;
 
-fn receive_message(stream: &mut TcpStream) -> io::Result<(i64, Message)> {
-    let mut timestamp_buf = [0u8; 8];
-    stream.read_exact(&mut timestamp_buf)?;
-    let timestamp = i64::from_le_bytes(timestamp_buf);
+mod ui;
+use ui::Ui;
 
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf)?;
-    let len = u32::from_le_bytes(len_buf);
-
-    let mut buf = vec![0u8; len as usize];
-    stream.read_exact(&mut buf)?;
-
-    let decoded = postcard::from_bytes(&buf).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-
-    Ok((timestamp, decoded))
-}
-
-fn receive_messages(mut stream: TcpStream, shared: Arc<Shared>) {
-    thread::spawn(move || {
-        while !shared.exit.load(Ordering::SeqCst) {
-            match receive_message(&mut stream) {
-                Ok((timestamp_secs, message)) => {
-                    let mut messages = shared.messages.lock().unwrap();
-                    let datetime = datetime_from_timestamp(timestamp_secs).to_string();
-                    match message {
-                        Message::ClientConnected {name, color} => {
-                            messages.push(Line::from(vec![
-                                datetime.into(),
-                                Span::from(" "),
-                                Span::styled(name, Style::default().fg(color.into())),
-                                Span::from(" connected"),
-                            ]));
-                        }
-                        Message::ClientDisconnected {name, color, reason} => {
-                            messages.push(Line::from(vec![
-                                datetime.into(),
-                                Span::from(" "),
-                                Span::styled(name, Style::default().fg(color.into())),
-                                format!(" disconnected (reason: {reason})").into()
-                            ]));
-                        }
-                        Message::ClientMessage {name, color, msg} => {
-                            messages.push(Line::from(vec![
-                                datetime.into(),
-                                Span::from(" "),
-                                Span::styled(name, Style::default().fg(color.into())),
-                                format!(": {msg}").into()
-                            ]));
-                        }
-                        Message::ClientList { clients } => {
-                            messages.push(Line::from("Connected clients:"));
-
-                            for (name, color) in clients {
-                                messages.push(Line::styled(format!("• {name}"), Style::default().fg(color.into())));
-                            }
-                        }
-                        Message::ClientKicked {name, reason} => {
-                            if name == *shared.name.lock().unwrap() {
-                                shared.after_disconnect_messages
-                                    .lock()
-                                    .unwrap()
-                                    .push(format!("INFO: You are kicked from the server (reason: {reason})"));
-
-                                shared.exit.store(true, Ordering::SeqCst);
-                            }
-                        },
-                        Message::ClientChangedName {old_name, new_name} => messages.push(format!("{datetime} {old_name} changed their name to {new_name}").into()),
-                        Message::ClientAssignedColor { color } => *shared.color.lock().unwrap() = color,
-                        Message::NameTaken { old_name } => {
-                            messages.push("name: new name that you requested is already taken by someone else".into());
-                            *shared.name.lock().unwrap() = old_name;
-                        }
-                        _ => {}
-                    }
-                },
-                Err(ref err)
-                    if err.kind() == io::ErrorKind::WouldBlock
-                        || err.kind() == io::ErrorKind::TimedOut => continue,
-                Err(err) => {
-                    let mut after_disconnect_messages = shared.after_disconnect_messages.lock().unwrap();
-
-                    match err.kind() {
-                        io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset => {
-                            after_disconnect_messages.push(String::from("INFO: Server closed the connection"));
-                        }
-                        _ => after_disconnect_messages.push(format!("ERROR: {err}"))
-                    }
-
-                    shared.exit.store(true, Ordering::SeqCst);
-                }
-            }
-        }
-    });
-}
+mod handshake_error;
+use handshake_error::HandshakeError;
 
 fn exit_app(app: &mut App, _: &str) {
     app.shared.exit.store(true, Ordering::SeqCst);
@@ -245,65 +160,10 @@ const COMMANDS: &[Command] = &[
     }
 ];
 
-struct Shared {
-    messages: Mutex<Vec<Line<'static>>>,
-    after_disconnect_messages: Mutex<Vec<String>>,
-    exit: AtomicBool,
-    name: Mutex<String>,
-    color: Mutex<ChatColor>
-}
-
-impl Shared {
-    fn new(name: String) -> Self {
-        Self {
-            messages: Mutex::new(
-                vec![
-                    Line::from(vec![
-                        "Welcome to ".into(),
-                        "ChaTTY ".yellow(),
-                        CHATTY_VERSION.yellow(),
-                        "!".into()
-                    ]),
-                    Line::from(vec![
-                        "Use ".into(),
-                        "UP".yellow(),
-                        "/".into(),
-                        "DOWN".yellow(),
-                        " to scroll".into()
-                    ]),
-                    Line::from(vec![
-                        "Type and press ".into(),
-                        "ENTER".yellow(),
-                        " to send".into()
-                    ]),
-                    Line::from(vec![
-                        "Type ".into(),
-                        "/help".yellow(),
-                        " for help".into()
-                    ]),
-                    Line::from(vec![
-                        "Press ".into(),
-                        "ESC".yellow(),
-                        " to exit".into()
-                    ])
-                ]
-            ),
-            after_disconnect_messages: Mutex::new(Vec::new()),
-            exit: AtomicBool::new(false),
-            name: Mutex::new(name),
-            color: Mutex::new(ChatColor::Reset)
-        }
-    }
-}
-
 struct App {
-    input_box: TextArea<'static>,
-    vertical_scroll_state: ScrollbarState,
-    vertical_scroll: usize,
     last_tick: Instant,
-    max_scroll: usize,
-    auto_scroll: bool,
     stream: TcpStream,
+    ui: Ui,
     shared: Arc<Shared>
 }
 
@@ -312,13 +172,9 @@ impl App {
 
     fn new(name: &str, stream: TcpStream) -> Self {
         Self {
-            input_box: TextArea::default(),
-            vertical_scroll_state: ScrollbarState::default(),
-            vertical_scroll: 0,
             last_tick: Instant::now(),
-            max_scroll: 0,
-            auto_scroll: true,
             stream,
+            ui: Ui::new(),
             shared: Arc::new(Shared::new(name.to_string()))
         }
     }
@@ -331,7 +187,7 @@ impl App {
                 match input.key {
                     Key::Esc => self.shared.exit.store(true, Ordering::SeqCst),
                     Key::Enter => {
-                        let input = self.input_box.lines().join("\n");
+                        let input = self.ui.input_box.lines().join("\n");
                         let line = input.trim();
 
                         if line.is_empty() {
@@ -349,8 +205,8 @@ impl App {
                                 messages.push(format!("CMD: Unknown command: {cmd_name}").into());
                             }
 
-                            self.input_box.select_all();
-                            self.input_box.cut();
+                            self.ui.input_box.select_all();
+                            self.ui.input_box.cut();
 
                             return Ok(());
                         }
@@ -386,13 +242,13 @@ impl App {
                             ]));
                         }
 
-                        self.input_box.select_all();
-                        self.input_box.cut();
+                        self.ui.input_box.select_all();
+                        self.ui.input_box.cut();
                     }
-                    Key::Up => self.vertical_scroll_up(),
-                    Key::Down => self.vertical_scroll_down(),
+                    Key::Up => self.ui.vertical_scroll_up(),
+                    Key::Down => self.ui.vertical_scroll_down(),
                     _ => {
-                        self.input_box.input(input);
+                        self.ui.input_box.input(input);
                     }
                 }
             }
@@ -402,10 +258,10 @@ impl App {
     }
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<(), Box<dyn Error>> {
-        receive_messages(self.stream.try_clone()?, self.shared.clone());
+        spawn_receiver(self.stream.try_clone()?, self.shared.clone());
 
         while !self.shared.exit.load(Ordering::SeqCst) {
-            terminal.draw(|frame| self.draw_ui(frame))?;
+            terminal.draw(|frame| self.ui.draw(frame, &self.shared))?;
             self.handle_events()?;
 
             if self.last_tick.elapsed() >= Self::TICK_RATE {
@@ -414,108 +270,7 @@ impl App {
         }
         Ok(())
     }
-
-    fn draw_ui(&mut self, frame: &mut Frame) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .margin(1)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(3)
-            ])
-            .split(frame.area());
-
-        self.draw_chat_window(frame, chunks[0]);
-        self.draw_input_box(frame, chunks[1]);
-    }
-
-    fn draw_chat_window(&mut self, frame: &mut Frame, chat_window_area: Rect) {
-        let messages = self.shared.messages.lock().unwrap();
-
-        let block = Block::default()
-            .title(" ChaTTY ".yellow())
-            .title_alignment(Alignment::Center)
-            .borders(Borders::ALL);
-
-        let chat = Paragraph::new(messages.clone())
-            .wrap(Wrap { trim: true })
-            .block(block)
-            .scroll((self.vertical_scroll as u16, 0));
-
-        let line_count = chat.line_count(chat_window_area.width - 2);
-        let visible_lines = (chat_window_area.height) as usize;
-        self.max_scroll = line_count.saturating_sub(visible_lines);
-
-        if self.vertical_scroll > self.max_scroll || self.auto_scroll {
-            self.vertical_scroll = self.max_scroll;
-        }
-        self.vertical_scroll_state = self.vertical_scroll_state
-            .content_length(self.max_scroll)
-            .position(self.vertical_scroll);
-
-        frame.render_widget(chat, chat_window_area);
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight),
-            chat_window_area,
-            &mut self.vertical_scroll_state,
-        );
-    }
-
-    fn draw_input_box(&mut self, frame: &mut Frame, input_box_area: Rect) {
-        let name = self.shared.name.lock().unwrap().to_owned();
-        let color: Color = self.shared.color.lock().unwrap().to_owned().into();
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(vec![" You (".into(), Span::styled(name, Style::default().fg(color)), "): ".into()])
-            .fg(Color::Yellow);
-
-        self.input_box.set_block(block);
-        self.input_box.set_cursor_line_style(Style::default());
-        self.input_box.set_placeholder_text("Your message...");
-
-        frame.render_widget(&self.input_box, input_box_area);
-    }
-
-    fn vertical_scroll_up(&mut self) {
-        self.vertical_scroll = self.vertical_scroll.saturating_sub(1);
-        self.vertical_scroll_state = self.vertical_scroll_state.position(self.vertical_scroll);
-        self.auto_scroll = false;
-    }
-
-    fn vertical_scroll_down(&mut self) {
-        self.vertical_scroll = self.vertical_scroll.saturating_add(1);
-        self.vertical_scroll_state = self.vertical_scroll_state.position(self.vertical_scroll);
-        if self.vertical_scroll >= self.max_scroll {
-            self.auto_scroll = true;
-        }
-    }
 }
-
-#[derive(Debug)]
-enum HandshakeError {
-    IO(io::Error),
-    Timeout,
-    InvalidMagic
-}
-
-impl fmt::Display for HandshakeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            HandshakeError::IO(err) => write!(f, "{err}"),
-            HandshakeError::Timeout => write!(f, "Timeout expired"),
-            HandshakeError::InvalidMagic => write!(f, "Not a ChaTTY server")
-        }
-    }
-}
-
-impl From<io::Error> for HandshakeError {
-    fn from(err: io::Error) -> Self {
-        HandshakeError::IO(err)
-    }
-}
-
-impl Error for HandshakeError {}
 
 fn init_handshake(stream: &mut TcpStream) -> Result<(), HandshakeError> {
     stream.write_all(b"ChaTTY\0\0").map_err(|err| {
@@ -540,56 +295,54 @@ fn init_handshake(stream: &mut TcpStream) -> Result<(), HandshakeError> {
     Ok(())
 }
 
+fn connect(address: &str, name: &str) -> Result<TcpStream, Box<dyn Error>> {
+    let sock_addr = address.to_socket_addrs()
+        .inspect_err(|err| eprintln!("ERROR: Failed to resolve address {address}: {err}"))?
+        .find(|a| a.is_ipv4())
+        .unwrap();
+
+    let mut stream = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(20))
+        .inspect_err(|err| eprintln!("ERROR: Failed to connect: {err}"))?;
+
+    stream.set_read_timeout(Some(Duration::from_secs(20)))
+        .inspect_err(|err| eprintln!("ERROR: Failed to set read timeout: {err}"))?;
+    stream.set_write_timeout(Some(Duration::from_secs(20)))
+        .inspect_err(|err| eprintln!("ERROR: Failed to set write timeout: {err}"))?;
+
+    println!("INFO: Connected to {sock_addr}");
+    println!("INFO: Initiating a handshake...");
+    init_handshake(&mut stream).inspect_err(|err| eprintln!("ERROR: Handshake failed: {err}"))?;
+
+    send_message(&mut stream, Message::ClientConnected {
+        name: name.to_string(),
+        color: ChatColor::Reset
+    }, None).inspect_err(|err| eprintln!("ERROR: Failed to send your name to the server: {err}"))?;
+
+    Ok(stream)
+}
+
+fn prompt(msg: &str) -> String {
+    println!("{msg}");
+    let mut input = String::new();
+    stdin().read_line(&mut input).unwrap();
+    input.trim().to_string()
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     println!("INFO: ChaTTY {CHATTY_VERSION}");
 
-    println!("Enter the server address (ip:port)");
-    let mut server_address = String::new();
-    stdin().read_line(&mut server_address).unwrap();
+    let address = prompt("Enter the server address (ip:port):");
+    let name = prompt("Enter your name:");
 
-    let server_address_trimmed = server_address.trim();
-
-    let server_sock_addr = server_address_trimmed.to_socket_addrs().inspect_err(|err| {
-        eprintln!("ERROR: Failed to resolve address {server_address_trimmed}: {err}");
-    })?.find(|a| a.is_ipv4()).unwrap();
-
-    let mut stream = TcpStream::connect_timeout(&server_sock_addr, Duration::from_secs(20)).map_err(|err| {
-        eprintln!("ERROR: Failed to connect: {err}");
-        err
-    })?;
-
-    stream.set_read_timeout(Some(Duration::from_secs(20))).inspect_err(|err| {
-        eprintln!("ERROR: Failed to set read timeout: {err}");
-    })?;
-    stream.set_write_timeout(Some(Duration::from_secs(20))).inspect_err(|err| {
-        eprintln!("ERROR: Failed to set write timeout: {err}");
-    })?;
-
-    println!("INFO: Connected to {server_sock_addr}");
-    println!("INFO: Initiating a handshake...");
-    init_handshake(&mut stream).inspect_err(|err| {
-        eprintln!("ERROR: Handshake failed: {err}");
-    })?;
-
-    println!("Enter your name:");
-    let mut name = String::new();
-    stdin().read_line(&mut name).unwrap();
-    let name_trimmed = name.trim();
-    if name_trimmed.is_empty() {
+    if name.is_empty() {
         eprintln!("ERROR: Cant have an empty name mate");
         return Ok(());
     }
 
-    let connect_message = Message::ClientConnected {
-        name: name_trimmed.to_string(),
-        color: ChatColor::Reset
-    };
-    send_message(&mut stream, connect_message, None).inspect_err(|err| {
-        eprintln!("ERROR: Failed to send your name to the server: {err}");
-    })?;
+    let stream = connect(&address, &name)?;
 
     let mut terminal = ratatui::init();
-    let mut app = App::new(name_trimmed, stream);
+    let mut app = App::new(&name, stream);
     let app_result = app.run(&mut terminal);
 
     ratatui::restore();

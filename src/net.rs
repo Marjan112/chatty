@@ -57,7 +57,7 @@ pub fn spawn_receiver(stream: TcpStream, shared: Arc<Shared>) {
     });
 }
 
-fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Arc<Shared>) {
+fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Shared) {
     let mut messages = shared.messages.lock().unwrap();
     let datetime = datetime_from_timestamp(timestamp_secs).to_string();
 

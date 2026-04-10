@@ -81,7 +81,7 @@ impl Ui {
             .fg(Color::Yellow);
 
         self.input_box.set_block(block);
-        self.input_box.set_cursor_line_style(Style::default());
+        self.input_box.set_cursor_line_style(Style::default().fg(Color::Reset));
         self.input_box.set_placeholder_text("Your message...");
 
         frame.render_widget(&self.input_box, input_box_area);

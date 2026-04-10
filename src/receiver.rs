@@ -100,9 +100,9 @@ fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Share
                     .unwrap()
                     .push(format!("INFO: You are kicked from the server (reason: {reason})"));
 
-                        shared.exit.store(true, Ordering::SeqCst);
-                    }
-                },
+                shared.exit.store(true, Ordering::SeqCst);
+            }
+        },
         Message::ClientChangedName {old_name, new_name} => messages.push(format!("{datetime} {old_name} changed their name to {new_name}").into()),
         Message::ClientAssignedColor { color } => *shared.color.lock().unwrap() = color,
         Message::NameTaken { old_name } => {

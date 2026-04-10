@@ -33,7 +33,7 @@ pub fn spawn_receiver(stream: TcpStream, shared: Arc<Shared>) {
     let mut receiver = Receiver::new(stream);
 
     thread::spawn(move || {
-        while !shared.exit.load(Ordering::SeqCst) {
+        while !shared.exit.load(Ordering::Relaxed) {
             match receiver.try_recv() {
                 Ok(Some((timestamp_secs, message))) => handle_incoming_message(timestamp_secs, message, &shared),
                 Ok(None) => thread::sleep(Duration::from_millis(1)),
@@ -50,7 +50,7 @@ pub fn spawn_receiver(stream: TcpStream, shared: Arc<Shared>) {
                         _ => after.push(format!("ERROR: {err}"))
                     }
 
-                    shared.exit.store(true, Ordering::SeqCst);
+                    shared.exit.store(true, Ordering::Relaxed);
                 }
             }
         }
@@ -100,7 +100,7 @@ fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Share
                     .unwrap()
                     .push(format!("INFO: You are kicked from the server (reason: {reason})"));
 
-                shared.exit.store(true, Ordering::SeqCst);
+                shared.exit.store(true, Ordering::Relaxed);
             }
         },
         Message::ClientChangedName {old_name, new_name} => messages.push(format!("{datetime} {old_name} changed their name to {new_name}").into()),

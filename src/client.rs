@@ -19,8 +19,8 @@ use chat_color::*;
 mod message;
 use message::*;
 
-mod net;
-use net::*;
+mod receiver;
+use receiver::*;
 
 mod shared;
 use shared::*;
@@ -35,7 +35,7 @@ mod handshake_error;
 use handshake_error::HandshakeError;
 
 fn exit_app(app: &mut App, _: &str) {
-    app.shared.exit.store(true, Ordering::SeqCst);
+    app.shared.exit.store(true, Ordering::Relaxed);
 }
 
 struct Command {
@@ -185,7 +185,7 @@ impl App {
             if let Event::Key(key) = event::read()? {
                 let input = Input::from(key);
                 match input.key {
-                    Key::Esc => self.shared.exit.store(true, Ordering::SeqCst),
+                    Key::Esc => self.shared.exit.store(true, Ordering::Relaxed),
                     Key::Enter => {
                         let input = self.ui.input_box.lines().join("\n");
                         let line = input.trim();
@@ -260,7 +260,7 @@ impl App {
     fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<(), Box<dyn Error>> {
         spawn_receiver(self.stream.try_clone()?, self.shared.clone());
 
-        while !self.shared.exit.load(Ordering::SeqCst) {
+        while !self.shared.exit.load(Ordering::Relaxed) {
             terminal.draw(|frame| self.ui.draw(frame, &self.shared))?;
             self.handle_events()?;
 

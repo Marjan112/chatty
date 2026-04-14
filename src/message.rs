@@ -58,9 +58,6 @@ pub enum Message {
     },
     NameTaken {
         old_name: String
-    },
-    Handshake {
-        id: [u8; 8]
     }
 }
 

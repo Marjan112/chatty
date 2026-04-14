@@ -5,7 +5,7 @@ use mio::{
 use std::{
     collections::HashMap,
     error::Error,
-    io,
+    io::{self, Write, Read},
     net::SocketAddr,
     hash::{Hash, Hasher},
     collections::hash_map::DefaultHasher
@@ -24,8 +24,9 @@ use env::*;
 struct Client {
     stream: TcpStream,
     name: String,
-    color: ChatColor,
     buffer: Vec<u8>,
+    color: ChatColor,
+    handshake_finished: bool,
 }
 
 impl Client {
@@ -139,12 +140,17 @@ impl Server {
             name: String::new(),
             color: ChatColor::Reset,
             buffer: Vec::new(),
+            handshake_finished: false
         });
     }
 
     fn client_broadcast(&mut self, sender_token: &Token, timestamp_secs: i64, msg: String) {
         if let Some(client) = self.clients.get(sender_token) {
             let client_name = client.name.clone();
+            if client_name.is_empty() {
+                return;
+            }
+
             println!("INFO: ({}) '{}' says: {}", datetime_from_timestamp(timestamp_secs), client_name, msg);
 
             let broadcast_msg = Message::ClientMessage {name: client_name, color: client.color, msg};
@@ -258,7 +264,9 @@ impl Server {
     }
 
     fn client_read(&mut self, token: Token) {
-        self.client_read_messages(&token);
+        if self.client_handshake(&token) {
+            self.client_read_messages(&token);
+        }
     }
 
     fn client_change_name(&mut self, token: &Token, new_name: String) {
@@ -307,7 +315,6 @@ impl Server {
                                 Message::GetClientList => self.client_send_list(token),
                                 Message::ClientWantNewName { new_name } => self.client_change_name(token, new_name),
                                 Message::ClientWantNewColor { new_color } => self.client_change_color(token, new_color),
-                                Message::Handshake { id } => self.client_handshake(token, id),
                                 _ => {}
                             };
                         }
@@ -329,14 +336,52 @@ impl Server {
         }
     }
 
-    fn client_handshake(&mut self, token: &Token, id: [u8; 8]) {
-        const EXPECTED_MAGIC: [u8; 8] = *b"ChaTTY\0\0";
+    fn client_handshake(&mut self, token: &Token) -> bool {
+        let client = match self.clients.get_mut(token) {
+            Some(c) => c,
+            None => return false,
+        };
 
-        if id != EXPECTED_MAGIC {
-            self.client_disconnected(token, "invalid client");
-        } else if let Err(err) = self.client_send_message(token, Message::Handshake { id: EXPECTED_MAGIC }, None) {
-            self.client_disconnected(token, &err.to_string());
+        if client.handshake_finished {
+            return true;
         }
+
+        const EXPECTED_MAGIC: &[u8] = b"ChaTTY\0\0";
+
+        loop {
+            if client.buffer.len() >= 8 {
+                break;
+            }
+
+            let mut temp = [0u8; 8];
+            match client.stream.read(&mut temp) {
+                Ok(0) => {
+                    self.client_disconnected(token, "connection closed");
+                    return false;
+                }
+                Ok(n) => client.buffer.extend_from_slice(&temp[..n]),
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return false,
+                Err(err) => {
+                    self.client_disconnected(token, &err.to_string());
+                    return false;
+                }
+            }
+        }
+
+        if client.buffer[..8] != *EXPECTED_MAGIC {
+            self.client_disconnected(token, "invalid client");
+            return false;
+        }
+
+        client.buffer.drain(..8);
+
+        if let Err(err) = client.stream.write_all(EXPECTED_MAGIC) {
+            self.client_disconnected(token, &err.to_string());
+            return false;
+        }
+
+        client.handshake_finished = true;
+        true
     }
 }
 

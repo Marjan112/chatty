@@ -1,5 +1,5 @@
 use std::{
-    io,
+    io::{self, Write, Read},
     net::{TcpStream, Shutdown},
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
@@ -176,6 +176,19 @@ const COMMANDS: &[Command] = &[
     }
 ];
 
+fn init_handshake(stream: &mut TcpStream) -> io::Result<()> {
+    stream.write_all(b"ChaTTY\0\0")?;
+
+    let mut server_magic_buf = [0u8; 8];
+    stream.read_exact(&mut server_magic_buf)?;
+
+    if server_magic_buf != *b"ChaTTY\0\0" {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Not a ChaTTY server"));
+    }
+
+    Ok(())
+}
+
 #[derive(Default)]
 struct App {
     ui: Ui,
@@ -192,12 +205,10 @@ impl App {
     }
 
     fn connect(&mut self, address: String, name: String) {
-        *self.shared.name.lock().unwrap() = name;
-
         let stream_result = TcpStream::connect(address)
             .and_then(|mut stream| {
-                stream.set_nonblocking(true)?;
-                send_message(&mut stream, Message::Handshake { id: *b"ChaTTY\0\0" }, None)?;
+                init_handshake(&mut stream)?;
+                send_message(&mut stream, Message::ClientConnected { name: name.clone(), color: ChatColor::Reset }, None)?;
                 spawn_receiver(stream.try_clone()?, self.shared.clone());
                 Ok(stream)
             });
@@ -206,6 +217,7 @@ impl App {
             Ok(stream) => {
                 self.stream = Some(stream);
                 self.shared.connection.store(true, Ordering::Relaxed);
+                *self.shared.name.lock().unwrap() = name;
             }
             Err(err) => self.error = Some(io::Error::new(err.kind(), format!("Failed to connect: {err}")))
         }

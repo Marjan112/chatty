@@ -12,9 +12,8 @@ use ratatui::{
 
 use crate::message::*;
 use crate::shared::*;
-use crate::chat_color::*;
 
-fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Shared, stream: &mut TcpStream) {
+fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Shared) {
     let mut messages = shared.messages.lock().unwrap();
     let datetime = datetime_from_timestamp(timestamp_secs).to_string();
 
@@ -67,16 +66,6 @@ fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Share
             messages.push("name: new name that you requested is already taken by someone else".into());
             *shared.name.lock().unwrap() = old_name;
         },
-        Message::Handshake { id } => {
-            if id != *b"ChaTTY\0\0" {
-                messages.push("handshake: not a chatty server".into());
-            } else {
-                let _ = send_message(stream, Message::ClientConnected {
-                    name: shared.name.lock().unwrap().clone(),
-                    color: ChatColor::Reset
-                }, None);
-            }
-        }
         _ => {}
     }
 }
@@ -87,7 +76,7 @@ pub fn spawn_receiver(mut stream: TcpStream, shared: Arc<Shared>) {
 
         while !shared.exit.load(Ordering::Relaxed) {
             match receive_message(&mut stream, &mut buffer) {
-                Ok(Some((timestamp_secs, message))) => handle_incoming_message(timestamp_secs, message, &shared, &mut stream),
+                Ok(Some((timestamp_secs, message))) => handle_incoming_message(timestamp_secs, message, &shared),
                 Ok(None) => thread::sleep(Duration::from_millis(1)),
                 Err(ref err)
                     if err.kind() == io::ErrorKind::WouldBlock

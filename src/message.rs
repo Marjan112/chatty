@@ -58,6 +58,9 @@ pub enum Message {
     },
     NameTaken {
         old_name: String
+    },
+    Handshake {
+        id: [u8; 8]
     }
 }
 
@@ -99,7 +102,7 @@ pub fn receive_message<T: Read>(stream: &mut T, buffer: &mut Vec<u8>) -> io::Res
 
         let mut temp = [0u8; 1024];
         match stream.read(&mut temp) {
-            Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed")),
+            Ok(0) => return Err(io::Error::new(io::ErrorKind::ConnectionReset, "connection closed")),
             Ok(n) => buffer.extend_from_slice(&temp[..n]),
             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(None),
             Err(err) => return Err(err)
@@ -126,6 +129,6 @@ pub fn receive_message<T: Read>(stream: &mut T, buffer: &mut Vec<u8>) -> io::Res
 
     let msg = postcard::from_bytes(&msg_bytes)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("failed to deserialize message: {err}")))?;
-        
+
     Ok(Some((timestamp, msg)))
 }

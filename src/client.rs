@@ -1,17 +1,15 @@
 use std::{
-    error::Error,
-    io::{self, stdin, Read, Write},
-    net::{TcpStream, ToSocketAddrs},
+    io,
+    net::{TcpStream, Shutdown},
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
 use ratatui::{
-    crossterm::event::{self, Event},
+    crossterm::event::{self, Event, KeyCode},
     style::{Color, Style},
     text::{Line, Span},
     DefaultTerminal,
 };
-use tui_textarea::{Input, Key};
 
 mod chat_color;
 use chat_color::*;
@@ -29,10 +27,7 @@ mod env;
 use env::*;
 
 mod ui;
-use ui::Ui;
-
-mod handshake_error;
-use handshake_error::HandshakeError;
+use ui::*;
 
 fn exit_app(app: &mut App, _: &str) {
     app.shared.exit.store(true, Ordering::Relaxed);
@@ -72,8 +67,10 @@ const COMMANDS: &[Command] = &[
         signature: "/list",
         run: |app, _| {
             let mut messages = app.shared.messages.lock().unwrap();
-            if let Err(err) = send_message(&mut app.stream, Message::GetClientList, None) {
-                messages.push(format!("list: failed to get client list: {err}").into());
+            if let Some(stream) = &mut app.stream {
+                if let Err(err) = send_message(stream, Message::GetClientList, None) {
+                    messages.push(format!("list: failed to get client list: {err}").into());
+                }
             }
         }
     },
@@ -99,9 +96,11 @@ const COMMANDS: &[Command] = &[
 
             *current_name = new_name.to_string();
 
-            if let Err(err) = send_message(&mut app.stream, Message::ClientWantNewName { new_name: new_name.to_string() }, None) {
-                messages.push(format!("name: failed to change your display name: {err}").into());
-                *current_name = old_name;
+            if let Some(stream) = &mut app.stream {
+                if let Err(err) = send_message(stream, Message::ClientWantNewName { new_name: new_name.to_string() }, None) {
+                    messages.push(format!("name: failed to change your display name: {err}").into());
+                    *current_name = old_name;
+                }
             }
         }
     },
@@ -131,9 +130,11 @@ const COMMANDS: &[Command] = &[
 
                     *current_color = new_chat_color;
 
-                    if let Err(err) = send_message(&mut app.stream, Message::ClientWantNewColor { new_color: new_chat_color }, None) {
-                        messages.push(format!("color: failed to change your color: {err}").into());
-                        *current_color = old_color;
+                    if let Some(stream) = &mut app.stream {
+                        if let Err(err) = send_message(stream, Message::ClientWantNewColor { new_color: new_chat_color }, None) {
+                            messages.push(format!("color: failed to change your color: {err}").into());
+                            *current_color = old_color;
+                        }
                     }
 
                     let current_color: Color = current_color.to_owned().into();
@@ -157,98 +158,171 @@ const COMMANDS: &[Command] = &[
         description: "Does the same as /exit",
         signature: "/quit",
         run: exit_app
+    },
+    Command {
+        name: "disconnect",
+        description: "Disconnect but does not exit",
+        signature: "/disconnect",
+        run: |app, _| {
+            app.shared.messages.lock().unwrap().clear();
+
+            if let Some(stream) = &mut app.stream {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+
+            app.stream = None;
+            app.shared.connection.store(false, Ordering::Relaxed);
+        }
     }
 ];
 
+#[derive(Default)]
 struct App {
-    last_tick: Instant,
-    stream: TcpStream,
     ui: Ui,
-    shared: Arc<Shared>
+    shared: Arc<Shared>,
+    stream: Option<TcpStream>,
+    error: Option<io::Error>
 }
 
 impl App {
     const TICK_RATE: Duration = Duration::from_millis(250);
 
-    fn new(name: &str, stream: TcpStream) -> Self {
-        Self {
-            last_tick: Instant::now(),
-            stream,
-            ui: Ui::new(),
-            shared: Arc::new(Shared::new(name.to_string()))
+    fn new() -> Self {
+        Default::default()
+    }
+
+    fn connect(&mut self, address: String, name: String) {
+        *self.shared.name.lock().unwrap() = name;
+
+        let stream_result = TcpStream::connect(address)
+            .and_then(|mut stream| {
+                stream.set_nonblocking(true)?;
+                send_message(&mut stream, Message::Handshake { id: *b"ChaTTY\0\0" }, None)?;
+                spawn_receiver(stream.try_clone()?, self.shared.clone());
+                Ok(stream)
+            });
+
+        match stream_result {
+            Ok(stream) => {
+                self.stream = Some(stream);
+                self.shared.connection.store(true, Ordering::Relaxed);
+            }
+            Err(err) => self.error = Some(io::Error::new(err.kind(), format!("Failed to connect: {err}")))
         }
     }
 
-    fn handle_events(&mut self) -> Result<(), Box<dyn Error>> {
-        let timeout = Self::TICK_RATE.saturating_sub(self.last_tick.elapsed());
+    fn handle_events(&mut self, last_tick: &Instant) -> io::Result<()> {
+        let timeout = Self::TICK_RATE.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
-                let input = Input::from(key);
-                match input.key {
-                    Key::Esc => self.shared.exit.store(true, Ordering::Relaxed),
-                    Key::Enter => {
-                        let input = self.ui.input_box.lines().join("\n");
-                        let line = input.trim();
-
-                        if line.is_empty() {
-                            return Ok(());
+                match key.code {
+                    KeyCode::Esc => {
+                        if self.error.is_some() {
+                            self.error = None;
+                        } else {
+                            self.shared.exit.store(true, Ordering::Relaxed);
                         }
+                    }
+                    KeyCode::Tab if !self.shared.connection.load(Ordering::Relaxed) => self.ui.connect_form.next_field(),
+                    KeyCode::Enter => {
+                        if !self.shared.connection.load(Ordering::Relaxed) {
+                            if self.error.is_none() {
+                                match self.ui.connect_form.focused {
+                                    ConnectFormField::Address => self.ui.connect_form.next_field(),
+                                    ConnectFormField::Name => {
+                                        let address = self.ui.address_input_box.lines()[0].trim().to_string();
+                                        let name = self.ui.name_input_box.lines()[0].trim().to_string();
 
-                        if let Some(cmd) = line.strip_prefix("/") {
-                            let cmd_name = cmd.split_whitespace().next().unwrap_or("");
-                            let args = cmd.strip_prefix(cmd_name).unwrap_or("").trim();
+                                        if address.is_empty() {
+                                            self.ui.connect_form.focused = ConnectFormField::Address;
+                                            return Ok(());
+                                        }
+                                        if name.is_empty() {
+                                            return Ok(());
+                                        }
 
-                            if let Some(command) = COMMANDS.iter().find(|c| c.name == cmd_name) {
-                                (command.run)(self, args);
-                            } else {
-                                let mut messages = self.shared.messages.lock().unwrap();
-                                messages.push(format!("CMD: Unknown command: {cmd_name}").into());
+                                        self.connect(address, name);
+
+                                        self.ui.address_input_box.select_all();
+                                        self.ui.address_input_box.cut();
+                                        self.ui.name_input_box.select_all();
+                                        self.ui.name_input_box.cut();
+
+                                        self.ui.connect_form.focused = ConnectFormField::Address;
+                                    }
+                                }
+                            }
+                        } else {
+                            let input = self.ui.chat_input_box.lines()[0].trim().to_string();
+
+                            if input.is_empty() {
+                                return Ok(());
                             }
 
-                            self.ui.input_box.select_all();
-                            self.ui.input_box.cut();
+                            if let Some(cmd) = input.strip_prefix("/") {
+                                let cmd_name = cmd.split_whitespace().next().unwrap_or("");
+                                let args = cmd.strip_prefix(cmd_name).unwrap_or("").trim();
 
-                            return Ok(());
+                                if let Some(command) = COMMANDS.iter().find(|c| c.name == cmd_name) {
+                                    (command.run)(self, args);
+                                } else {
+                                    let mut messages = self.shared.messages.lock().unwrap();
+                                    messages.push(format!("CMD: Unknown command: {cmd_name}").into());
+                                }
+
+                                self.ui.chat_input_box.select_all();
+                                self.ui.chat_input_box.cut();
+
+                                return Ok(());
+                            }
+
+                            let message = Message::ClientMessage {
+                                name: String::new(),
+                                color: ChatColor::Reset,
+                                msg: input.clone(),
+                            };
+
+                            let timestamp_secs = chrono::Local::now().timestamp();
+
+                            let mut messages = self.shared.messages.lock().unwrap();
+
+                            match send_message(self.stream.as_mut().unwrap(), message, Some(timestamp_secs)) {
+                                Ok(_) => {
+                                    let datetime = datetime_from_timestamp(timestamp_secs).to_string();
+                                    let name = self.shared.name
+                                        .lock()
+                                        .unwrap()
+                                        .to_owned();
+                                    let color: Color = self.shared.color
+                                        .lock()
+                                        .unwrap()
+                                        .to_owned()
+                                        .into();
+                                    messages.push(Line::from(vec![
+                                        datetime.into(),
+                                        " ".into(),
+                                        Span::styled(name, Style::default().fg(color)),
+                                        format!(": {input}").into()
+                                    ]));
+                                }
+                                Err(err) => messages.push(format!("ERROR: Failed to send message: {err}").into())
+                            }
+
+                            self.ui.chat_input_box.select_all();
+                            self.ui.chat_input_box.cut();
                         }
-
-                        let message = Message::ClientMessage {
-                            name: String::new(),
-                            color: ChatColor::Reset,
-                            msg: line.to_string(),
-                        };
-
-                        let timestamp_secs = chrono::Local::now().timestamp();
-
-                        let mut messages = self.shared.messages.lock().unwrap();
-
-                        if let Err(err) = send_message(&mut self.stream, message, Some(timestamp_secs)) {
-                            messages.push(format!("ERROR: Failed to send message: {err}").into());
-                        } else {
-                            let datetime = datetime_from_timestamp(timestamp_secs).to_string();
-                            let name = self.shared.name
-                                .lock()
-                                .unwrap()
-                                .to_owned();
-                            let color: Color = self.shared.color
-                                .lock()
-                                .unwrap()
-                                .to_owned()
-                                .into();
-                            messages.push(Line::from(vec![
-                                datetime.into(),
-                                " ".into(),
-                                Span::styled(name, Style::default().fg(color)),
-                                format!(": {line}").into()
-                            ]));
-                        }
-
-                        self.ui.input_box.select_all();
-                        self.ui.input_box.cut();
                     }
-                    Key::Up => self.ui.vertical_scroll_up(),
-                    Key::Down => self.ui.vertical_scroll_down(),
+                    KeyCode::Up => self.ui.vertical_scroll_up(),
+                    KeyCode::Down => self.ui.vertical_scroll_down(),
                     _ => {
-                        self.ui.input_box.input(input);
+                        if !self.shared.connection.load(Ordering::Relaxed) {
+                            match self.ui.connect_form.focused {
+                                ConnectFormField::Address => { self.ui.address_input_box.input(key); }
+                                ConnectFormField::Name => { self.ui.name_input_box.input(key); }
+                            }
+                        } else {
+                            self.ui.chat_input_box.input(key);
+                        }
                     }
                 }
             }
@@ -257,99 +331,37 @@ impl App {
         Ok(())
     }
 
-    fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<(), Box<dyn Error>> {
-        spawn_receiver(self.stream.try_clone()?, self.shared.clone());
+    fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        let mut last_tick = Instant::now();
 
         while !self.shared.exit.load(Ordering::Relaxed) {
-            terminal.draw(|frame| self.ui.draw(frame, &self.shared))?;
-            self.handle_events()?;
+            terminal.draw(|frame| {
+                if self.shared.connection.load(Ordering::Relaxed) {
+                    self.ui.draw_chat(frame, &self.shared);
+                } else {
+                    self.ui.draw_connect_form(frame);
+                    if let Some(err) = &self.error {
+                        Ui::draw_error_popup(frame, err.to_string());
+                    }
+                }
+            })?;
+            self.handle_events(&last_tick)?;
 
-            if self.last_tick.elapsed() >= Self::TICK_RATE {
-                self.last_tick = Instant::now();
+            if last_tick.elapsed() >= Self::TICK_RATE {
+                last_tick = Instant::now();
             }
         }
         Ok(())
     }
 }
 
-fn init_handshake(stream: &mut TcpStream) -> Result<(), HandshakeError> {
-    stream.write_all(b"ChaTTY\0\0").map_err(|err| {
-        match err.kind() {
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => HandshakeError::Timeout,
-            _ => HandshakeError::IO(err)
-        }
-    })?;
-
-    let mut server_magic_buf = [0u8; 8];
-    stream.read_exact(&mut server_magic_buf).map_err(|err| {
-        match err.kind() {
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => HandshakeError::Timeout,
-            _ => HandshakeError::IO(err)
-        }
-    })?;
-
-    if server_magic_buf != *b"ChaTTY\0\0" {
-        return Err(HandshakeError::InvalidMagic);
-    }
-
-    Ok(())
-}
-
-fn connect(address: &str, name: &str) -> Result<TcpStream, Box<dyn Error>> {
-    let sock_addr = address.to_socket_addrs()
-        .inspect_err(|err| eprintln!("ERROR: Failed to resolve address {address}: {err}"))?
-        .find(|a| a.is_ipv4())
-        .unwrap();
-
-    let mut stream = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(20))
-        .inspect_err(|err| eprintln!("ERROR: Failed to connect: {err}"))?;
-
-    stream.set_read_timeout(Some(Duration::from_secs(20)))
-        .inspect_err(|err| eprintln!("ERROR: Failed to set read timeout: {err}"))?;
-    stream.set_write_timeout(Some(Duration::from_secs(20)))
-        .inspect_err(|err| eprintln!("ERROR: Failed to set write timeout: {err}"))?;
-
-    println!("INFO: Connected to {sock_addr}");
-    println!("INFO: Initiating a handshake...");
-    init_handshake(&mut stream).inspect_err(|err| eprintln!("ERROR: Handshake failed: {err}"))?;
-
-    send_message(&mut stream, Message::ClientConnected {
-        name: name.to_string(),
-        color: ChatColor::Reset
-    }, None).inspect_err(|err| eprintln!("ERROR: Failed to send your name to the server: {err}"))?;
-
-    Ok(stream)
-}
-
-fn prompt(msg: &str) -> String {
-    println!("{msg}");
-    let mut input = String::new();
-    stdin().read_line(&mut input).unwrap();
-    input.trim().to_string()
-}
-
-fn main() -> Result<(), Box<dyn Error>> {
-    println!("INFO: ChaTTY {CHATTY_VERSION}");
-
-    let address = prompt("Enter the server address (ip:port):");
-    let name = prompt("Enter your name:");
-
-    if name.is_empty() {
-        eprintln!("ERROR: Cant have an empty name mate");
-        return Ok(());
-    }
-
-    let stream = connect(&address, &name)?;
-
+fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
-    let mut app = App::new(&name, stream);
+    let mut app = App::new();
+
     let app_result = app.run(&mut terminal);
 
     ratatui::restore();
-
-    for msg in app.shared.after_disconnect_messages.lock().unwrap().iter() {
-        println!("{msg}");
-    }
 
     app_result
 }

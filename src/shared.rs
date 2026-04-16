@@ -1,57 +1,28 @@
 use std::sync::{Mutex, atomic::AtomicBool};
-use ratatui::{
-    text::Line,
-    style::Stylize
-};
+use ratatui::text::Line;
 
-use crate::CHATTY_VERSION;
 use crate::ChatColor;
+use crate::ActivePopup;
+use crate::greet_message;
 
 pub struct Shared {
     pub messages: Mutex<Vec<Line<'static>>>,
     pub name: Mutex<String>,
     pub color: Mutex<ChatColor>,
     pub exit: AtomicBool,
-    pub connection: AtomicBool
+    pub connection: AtomicBool,
+    pub popup: Mutex<Option<ActivePopup>>
 }
 
 impl Default for Shared {
     fn default() -> Self {
         Self {
-            messages: Mutex::new(vec![
-                Line::from(vec![
-                    "Welcome to ".into(),
-                    "ChaTTY ".yellow(),
-                    CHATTY_VERSION.yellow(),
-                    "!".into()
-                ]),
-                Line::from(vec![
-                    "Use ".into(),
-                    "UP".yellow(),
-                    "/".into(),
-                    "DOWN".yellow(),
-                    " to scroll".into()
-                ]),
-                Line::from(vec![
-                    "Type and press ".into(),
-                    "ENTER".yellow(),
-                    " to send".into()
-                ]),
-                Line::from(vec![
-                    "Type ".into(),
-                    "/help".yellow(),
-                    " for help".into()
-                ]),
-                Line::from(vec![
-                    "Press ".into(),
-                    "ESC".yellow(),
-                    " to exit".into()
-                ])
-            ]),
+            messages: Mutex::new(greet_message()),
             exit: AtomicBool::default(),
             color: Mutex::default(),
             name: Mutex::default(),
-            connection: AtomicBool::default()
+            connection: AtomicBool::default(),
+            popup: Mutex::default()
         }
     }
 }

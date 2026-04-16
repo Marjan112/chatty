@@ -23,48 +23,48 @@ pub struct Popup<'a> {
 }
 
 impl<'a> Popup<'a> {
-    pub fn title<T: Into<Line<'a>>>(mut self, title: T) -> Self {
+    fn title<T: Into<Line<'a>>>(mut self, title: T) -> Self {
         let title = title.into();
         self.title = title;
         self
     }
 
-    pub fn title_bottom<T: Into<Line<'a>>>(mut self, title: T) -> Self {
+    fn title_bottom<T: Into<Line<'a>>>(mut self, title: T) -> Self {
         let title = title.into();
         self.title_bottom = title;
         self
     }
 
-    pub fn title_alignment(mut self, alignment: HorizontalAlignment) -> Self {
+    fn title_alignment(mut self, alignment: HorizontalAlignment) -> Self {
         self.title_alignment = alignment;
         self
     }
 
-    pub fn content<T: Into<Text<'a>>>(mut self, content: T) -> Self {
+    fn content<T: Into<Text<'a>>>(mut self, content: T) -> Self {
         let content = content.into();
         self.content = content;
         self
     }
 
-    pub fn border_style<T: Into<Style>>(mut self, style: T) -> Self {
+    fn border_style<T: Into<Style>>(mut self, style: T) -> Self {
         let style = style.into();
         self.border_style = style;
         self
     }
 
-    pub fn title_style<T: Into<Style>>(mut self, style: T) -> Self {
+    fn title_style<T: Into<Style>>(mut self, style: T) -> Self {
         let style = style.into();
         self.title_style = style;
         self
     }
 
-    pub fn style<T: Into<Style>>(mut self, style: T) -> Self {
+    fn style<T: Into<Style>>(mut self, style: T) -> Self {
         let style = style.into();
         self.style = style;
         self
     }
 
-    pub fn render_centered(self, area: Rect, buf: &mut Buffer) {
+    fn render_centered(self, area: Rect, buf: &mut Buffer) {
         let [vertical] = Layout::vertical([Constraint::Max(10)])
             .flex(Flex::Center)
             .areas(area);
@@ -94,6 +94,39 @@ impl Widget for Popup<'_> {
     }
 }
 
+pub enum ActivePopup {
+    Info(String),
+    Error(String)
+}
+
+impl ActivePopup {
+    pub fn draw(&self, frame: &mut Frame) {
+        let area = frame.area();
+        match self {
+            ActivePopup::Info(message) =>
+                Popup::default()
+                    .content(message.as_str())
+                    .style(Style::default())
+                    .title_alignment(HorizontalAlignment::Center)
+                    .title(" Info ")
+                    .title_bottom(vec![" <ESC> ".light_blue(), "dismiss ".dark_gray()])
+                    .title_style(Style::default().light_blue())
+                    .border_style(Style::default().light_blue())
+                    .render_centered(area, frame.buffer_mut()),
+            ActivePopup::Error(message) =>
+                Popup::default()
+                    .content(message.as_str())
+                    .style(Style::default())
+                    .title_alignment(HorizontalAlignment::Center)
+                    .title(" Error ")
+                    .title_bottom(vec![" <ESC> ".light_red(), "dismiss ".dark_gray()])
+                    .title_style(Style::default().light_red())
+                    .border_style(Style::default().light_red())
+                    .render_centered(area, frame.buffer_mut())
+        }
+    }
+}
+
 #[derive(Default, PartialEq)]
 pub enum ConnectFormField {
     #[default]
@@ -116,7 +149,6 @@ impl ConnectForm {
 }
 
 pub struct Ui {
-    pub connect_form: ConnectForm,
     pub address_input_box: TextArea<'static>,
     pub name_input_box: TextArea<'static>,
     pub chat_input_box: TextArea<'static>,
@@ -124,24 +156,10 @@ pub struct Ui {
     vertical_scroll: usize,
     max_scroll: usize,
     auto_scroll: bool,
+    pub connect_form: ConnectForm
 }
 
 impl Ui {
-    pub fn draw_error_popup<'a, T: Into<Text<'a>>>(frame: &mut Frame, content: T) {
-        let area = frame.area();
-
-        let popup = Popup::default()
-            .content(content)
-            .style(Style::default())
-            .title_alignment(HorizontalAlignment::Center)
-            .title(" Error ")
-            .title_bottom(vec![" ESC ".light_red(), "exit ".dark_gray()])
-            .title_style(Style::default().light_red())
-            .border_style(Style::default().light_red());
-
-        popup.render_centered(area, frame.buffer_mut());
-    }
-
     pub fn draw_connect_form(&mut self, frame: &mut Frame) {
         let [vertical] = Layout::vertical([Constraint::Max(10)])
             .flex(Flex::Center)
@@ -155,10 +173,10 @@ impl Ui {
             .title(format!(" ChaTTY ({CHATTY_VERSION}) - Connect "))
             .title_alignment(HorizontalAlignment::Center)
             .title_bottom(vec![
-                " ↹  ".yellow(),
+                " <TAB> ".yellow(),
                 "next ".dark_gray(),
                 "|".reset(),
-                " ESC ".yellow(),
+                " <ESC> ".yellow(),
                 "exit ".dark_gray()
             ])
             .yellow();

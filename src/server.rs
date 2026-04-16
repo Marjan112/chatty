@@ -21,6 +21,9 @@ use message::*;
 mod env;
 use env::*;
 
+mod utils;
+use utils::*;
+
 struct Client {
     stream: TcpStream,
     name: String,

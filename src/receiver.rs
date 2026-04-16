@@ -1,7 +1,7 @@
 use std::{
     io,
     net::{TcpStream, Shutdown},
-    thread,
+    thread::{self, JoinHandle},
     sync::{atomic::Ordering, Arc},
     time::Duration
 };
@@ -12,6 +12,8 @@ use ratatui::{
 
 use crate::message::*;
 use crate::shared::*;
+use crate::ActivePopup;
+use crate::datetime_from_timestamp;
 
 fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Shared) {
     let mut messages = shared.messages.lock().unwrap();
@@ -49,15 +51,9 @@ fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Share
                 messages.push(Line::styled(format!("• {name}"), Style::default().fg(color.into())));
             }
         }
-        Message::ClientKicked {name, ..} => {
+        Message::ClientKicked {name, reason} => {
             if name == *shared.name.lock().unwrap() {
-                // shared.after_disconnect_messages
-                //     .lock()
-                //     .unwrap()
-                //     .push(format!("INFO: You are kicked from the server (reason: {reason})"));
-
-                // TODO: When the client gets kicked we should notify them with some popup that says
-                // the reason for being kicked
+                *shared.popup.lock().unwrap() = Some(ActivePopup::Info(format!("You have been kicked (reason: {reason})")));
             }
         },
         Message::ClientChangedName {old_name, new_name} => messages.push(format!("{datetime} {old_name} changed their name to {new_name}").into()),
@@ -70,11 +66,11 @@ fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Share
     }
 }
 
-pub fn spawn_receiver(mut stream: TcpStream, shared: Arc<Shared>) {
+pub fn spawn_receiver(mut stream: TcpStream, shared: Arc<Shared>) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut buffer = Vec::new();
 
-        while !shared.exit.load(Ordering::Relaxed) {
+        while shared.connection.load(Ordering::Relaxed) {
             match receive_message(&mut stream, &mut buffer) {
                 Ok(Some((timestamp_secs, message))) => handle_incoming_message(timestamp_secs, message, &shared),
                 Ok(None) => thread::sleep(Duration::from_millis(1)),
@@ -82,25 +78,20 @@ pub fn spawn_receiver(mut stream: TcpStream, shared: Arc<Shared>) {
                     if err.kind() == io::ErrorKind::WouldBlock
                         || err.kind() == io::ErrorKind::TimedOut => continue,
                 Err(err) => {
-                    // let mut after = shared.after_disconnect_messages.lock().unwrap();
-
                     match err.kind() {
-                        io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe => {
+                        io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe => {
                             shared.messages.lock().unwrap().clear();
                             let _ = stream.shutdown(Shutdown::Both);
                             shared.connection.store(false, Ordering::Relaxed);
-                            break;
+                            *shared.popup.lock().unwrap() = Some(ActivePopup::Info(String::from("Disconnected from the server")));
                         }
                         _ => {
-                            // TODO: Instead of exiting the application maybe we should just get
-                            // back to the connect form and then display the error popup
-
-                            // after.push(format!("ERROR: {err}"));
-                            shared.exit.store(true, Ordering::Relaxed);
+                            shared.connection.store(false, Ordering::Relaxed);
+                            *shared.popup.lock().unwrap() = Some(ActivePopup::Error(err.to_string()));
                         }
                     }
                 }
             }
         }
-    });
+    })
 }

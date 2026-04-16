@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use std::{io::{self, Write, Read}, fmt};
-use chrono::{format::{DelayedFormat, StrftimeItems}, Local, TimeZone};
 use serde::{Serialize, Deserialize};
 
 use crate::ChatColor;
@@ -19,6 +18,8 @@ impl fmt::Display for KickReason {
     }
 }
 
+// Make clippy shut up
+#[allow(clippy::enum_variant_names)]
 #[derive(Serialize, Deserialize, Clone)]
 pub enum Message {
     ClientConnected {
@@ -59,15 +60,6 @@ pub enum Message {
     NameTaken {
         old_name: String
     }
-}
-
-// i know this function doesnt have to do anything with the message protocol stuff and that it
-// shouldnt be here but since i am using it both in server.rs and client.rs i thought i should put it
-// in here temporarily
-pub fn datetime_from_timestamp(secs: i64) -> DelayedFormat<StrftimeItems<'static>> {
-    Local.timestamp_opt(secs, 0)
-        .unwrap()
-        .format("%Y-%m-%d %H:%M")
 }
 
 pub fn send_message<T: Write>(stream: &mut T, message: Message, timestamp_secs: Option<i64>) -> io::Result<()> {

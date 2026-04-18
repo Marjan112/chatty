@@ -148,15 +148,52 @@ impl ConnectForm {
     }
 }
 
+#[derive(Default)]
+struct ScrollState {
+    bar: ScrollbarState,
+    scroll: usize,
+    max: usize,
+    auto: bool
+}
+
+impl ScrollState {
+    fn update_from_paragraph(&mut self, paragraph: &Paragraph<'_>, area: Rect) {
+        let line_count = paragraph.line_count(area.width - 2);
+        let visible_lines = area.height as usize;
+        self.max = line_count.saturating_sub(visible_lines);
+
+        if self.scroll > self.max || self.auto {
+            self.scroll = self.max;
+        }
+        self.bar = self.bar
+            .content_length(self.max)
+            .position(self.scroll);
+    }
+
+    fn scroll_up(&mut self) {
+        self.scroll = self.scroll.saturating_sub(1);
+        self.bar = self.bar.position(self.scroll);
+        self.auto = false;
+    }
+
+    fn scroll_down(&mut self) {
+        self.scroll = self.scroll.saturating_add(1);
+        self.bar = self.bar.position(self.scroll);
+        if self.scroll >= self.max {
+            self.auto = true;
+        }
+    }
+}
+
 pub struct Ui {
     pub address_input_box: TextArea<'static>,
     pub name_input_box: TextArea<'static>,
     pub chat_input_box: TextArea<'static>,
-    vertical_scroll_state: ScrollbarState,
-    vertical_scroll: usize,
-    max_scroll: usize,
-    auto_scroll: bool,
-    pub connect_form: ConnectForm
+    chat_scroll: ScrollState,
+    client_list_scroll: ScrollState,
+    pub connect_form: ConnectForm,
+    pub chat_window_area: Rect,
+    pub client_list_area: Rect
 }
 
 impl Ui {
@@ -185,13 +222,13 @@ impl Ui {
 
         frame.render_widget(container, horizontal);
 
-        let chunks = Layout::vertical([Constraint::Length(3), Constraint::Length(3)])
+        let [address_field, name_field] = Layout::vertical([Constraint::Length(3), Constraint::Length(3)])
             .flex(Flex::Center)
             .margin(1)
-            .split(container_inner);
+            .areas(container_inner);
 
-        self.draw_connect_form_address(frame, chunks[0]);
-        self.draw_connect_form_name(frame, chunks[1]);
+        self.draw_connect_form_address(frame, address_field);
+        self.draw_connect_form_name(frame, name_field);
     }
 
     fn draw_connect_form_address(&mut self, frame: &mut Frame, field_address_area: Rect) {
@@ -237,15 +274,77 @@ impl Ui {
     }
 
     pub fn draw_chat(&mut self, frame: &mut Frame, shared: &Shared) {
-        let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(3)])
-            .margin(1)
-            .split(frame.area());
+        /*
+        *  |---------------------------------| |------------|
+        *  | The chat...                     | |    List    |
+        *  |                                 | |            |
+        *  |                                 | |            |
+        *  |                                 | |            |
+        *  |                                 | |            |
+        *  |                                 | |            |
+        *  |                                 | |            |
+        *  |---------------------------------| |------------|
+        *  |------------------------------------------------|
+        *  |Input box                                       |
+        *  |________________________________________________|
+        */
 
-        self.draw_chat_window(frame, chunks[0], shared);
-        self.draw_chat_input_box(frame, chunks[1], shared);
+        // Split the screen in top and bottom (`top_area` and `input_box_area`) and then later split
+        // the `top_area` to `chat_window_area` and `client_list_area`
+
+        let [top_area, input_box_area] = Layout::vertical([
+            Constraint::Min(3),
+            Constraint::Length(3)
+        ])
+        .margin(1)
+        .areas(frame.area());
+
+        let [chat_window_area, client_list_area] = Layout::horizontal([
+            Constraint::Min(3),
+            Constraint::Length(15)
+        ])
+        .spacing(1)
+        .areas(top_area);
+
+        self.chat_window_area = chat_window_area;
+        self.client_list_area = client_list_area;
+
+        self.draw_chat_window(frame, shared);
+        self.draw_client_list(frame, shared);
+        self.draw_chat_input_box(frame, input_box_area, shared);
     }
 
-    fn draw_chat_window(&mut self, frame: &mut Frame, chat_window_area: Rect, shared: &Shared) {
+    fn draw_client_list(&mut self, frame: &mut Frame, shared: &Shared) {
+        let block = Block::bordered()
+            .title(" Clients ".yellow())
+            .title_alignment(HorizontalAlignment::Center);
+
+        let lock = shared.clients.lock().unwrap();
+        let mut clients = Vec::with_capacity(lock.len());
+
+        for (name, color) in lock.iter() {
+            let line = Line::styled(
+                format!("• {name}"),
+                Style::default().fg((*color).into())
+            );
+            clients.push(line);
+        }
+
+        let list = Paragraph::new(clients)
+            .wrap(Wrap { trim: true })
+            .block(block)
+            .scroll((self.client_list_scroll.scroll as u16, 0));
+
+        self.client_list_scroll.update_from_paragraph(&list, self.client_list_area);
+
+        frame.render_widget(list, self.client_list_area);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight),
+            self.client_list_area,
+            &mut self.client_list_scroll.bar);
+    }
+
+    fn draw_chat_window(&mut self, frame: &mut Frame, shared: &Shared) {
         let messages = shared.messages.lock().unwrap();
 
         let block = Block::bordered()
@@ -255,24 +354,15 @@ impl Ui {
         let chat = Paragraph::new(messages.clone())
             .wrap(Wrap { trim: true })
             .block(block)
-            .scroll((self.vertical_scroll as u16, 0));
+            .scroll((self.chat_scroll.scroll as u16, 0));
 
-        let line_count = chat.line_count(chat_window_area.width - 2);
-        let visible_lines = (chat_window_area.height) as usize;
-        self.max_scroll = line_count.saturating_sub(visible_lines);
+        self.chat_scroll.update_from_paragraph(&chat, self.chat_window_area);
 
-        if self.vertical_scroll > self.max_scroll || self.auto_scroll {
-            self.vertical_scroll = self.max_scroll;
-        }
-        self.vertical_scroll_state = self.vertical_scroll_state
-            .content_length(self.max_scroll)
-            .position(self.vertical_scroll);
-
-        frame.render_widget(chat, chat_window_area);
+        frame.render_widget(chat, self.chat_window_area);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight),
-            chat_window_area,
-            &mut self.vertical_scroll_state,
+            self.chat_window_area,
+            &mut self.chat_scroll.bar,
         );
     }
 
@@ -291,18 +381,20 @@ impl Ui {
         frame.render_widget(&self.chat_input_box, input_box_area);
     }
 
-    pub fn vertical_scroll_up(&mut self) {
-        self.vertical_scroll = self.vertical_scroll.saturating_sub(1);
-        self.vertical_scroll_state = self.vertical_scroll_state.position(self.vertical_scroll);
-        self.auto_scroll = false;
+    pub fn chat_scroll_up(&mut self) {
+        self.chat_scroll.scroll_up();
     }
 
-    pub fn vertical_scroll_down(&mut self) {
-        self.vertical_scroll = self.vertical_scroll.saturating_add(1);
-        self.vertical_scroll_state = self.vertical_scroll_state.position(self.vertical_scroll);
-        if self.vertical_scroll >= self.max_scroll {
-            self.auto_scroll = true;
-        }
+    pub fn chat_scroll_down(&mut self) {
+        self.chat_scroll.scroll_down();
+    }
+
+    pub fn client_list_scroll_up(&mut self) {
+        self.client_list_scroll.scroll_up();
+    }
+
+    pub fn client_list_scroll_down(&mut self) {
+        self.client_list_scroll.scroll_down();
     }
 }
 
@@ -313,10 +405,13 @@ impl Default for Ui {
             address_input_box: TextArea::default(),
             name_input_box: TextArea::default(),
             chat_input_box: TextArea::default(),
-            vertical_scroll_state: ScrollbarState::default(),
-            vertical_scroll: 0,
-            max_scroll: 0,
-            auto_scroll: true
+            chat_scroll: ScrollState {
+                auto: true,
+                ..Default::default()
+            },
+            client_list_scroll: ScrollState::default(),
+            chat_window_area: Rect::default(),
+            client_list_area: Rect::default()
         }
     }
 }

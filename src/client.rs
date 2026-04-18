@@ -1,11 +1,18 @@
 use std::{
+    boxed::Box,
     io::{self, Write, Read},
     net::{TcpStream, Shutdown},
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
 use ratatui::{
-    crossterm::event::{self, Event, KeyCode, KeyEventKind},
+    Terminal,
+    backend::CrosstermBackend,
+    crossterm::{
+        execute,
+        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+        event::{self, Event, KeyCode, KeyEventKind, MouseEventKind, EnableMouseCapture, DisableMouseCapture}
+    },
     style::{Color, Style},
     text::{Line, Span},
     DefaultTerminal,
@@ -62,19 +69,6 @@ const COMMANDS: &[Command] = &[
         description: "Clears the chat",
         signature: "/clear",
         run: |app, _| app.shared.messages.lock().unwrap().clear()
-    },
-    Command {
-        name: "list",
-        description: "Lists the connected clients",
-        signature: "/list",
-        run: |app, _| {
-            let mut messages = app.shared.messages.lock().unwrap();
-            if let Some(stream) = &mut app.stream {
-                if let Err(err) = send_message(stream, Message::GetClientList, None) {
-                    messages.push(format!("list: failed to get client list: {err}").into());
-                }
-            }
-        }
     },
     Command {
         name: "name",
@@ -169,6 +163,7 @@ const COMMANDS: &[Command] = &[
             app.shared.connection.store(false, Ordering::Relaxed);
 
             app.shared.messages.lock().unwrap().clear();
+            app.shared.clients.lock().unwrap().clear();
 
             if let Some(stream) = app.stream.take() {
                 let _ = stream.shutdown(Shutdown::Both);
@@ -229,8 +224,8 @@ impl App {
     fn handle_events(&mut self, last_tick: &Instant) -> io::Result<()> {
         let timeout = Self::TICK_RATE.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     match key.code {
                         KeyCode::Esc => {
                             let mut popup = self.shared.popup.lock().unwrap();
@@ -329,8 +324,6 @@ impl App {
                                 self.ui.chat_input_box.cut();
                             }
                         }
-                        KeyCode::Up => self.ui.vertical_scroll_up(),
-                        KeyCode::Down => self.ui.vertical_scroll_down(),
                         _ => {
                             if !self.shared.connection.load(Ordering::Relaxed) {
                                 match self.ui.connect_form.focused {
@@ -343,6 +336,27 @@ impl App {
                         }
                     }
                 }
+                Event::Mouse(mouse) => {
+                    let mouse_pos = (mouse.column, mouse.row).into();
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            if self.ui.chat_window_area.contains(mouse_pos) {
+                                self.ui.chat_scroll_up();
+                            } else if self.ui.client_list_area.contains(mouse_pos) {
+                                self.ui.client_list_scroll_up();
+                            }
+                        }
+                        MouseEventKind::ScrollDown => {
+                            if self.ui.chat_window_area.contains(mouse_pos) {
+                                self.ui.chat_scroll_down();
+                            } else if self.ui.client_list_area.contains(mouse_pos) {
+                                self.ui.client_list_scroll_down();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -351,6 +365,7 @@ impl App {
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         let mut last_tick = Instant::now();
+        let mut get_client_list_timer = Instant::now();
 
         while !self.shared.exit.load(Ordering::Relaxed) {
             terminal.draw(|frame| {
@@ -365,6 +380,13 @@ impl App {
             })?;
             self.handle_events(&last_tick)?;
 
+            if get_client_list_timer.elapsed() >= Duration::from_secs(1) {
+                if let Some(stream) = &mut self.stream {
+                    let _ = send_message(stream, Message::GetClientList, None);
+                }
+                get_client_list_timer = Instant::now();
+            }
+
             if last_tick.elapsed() >= Self::TICK_RATE {
                 last_tick = Instant::now();
             }
@@ -373,13 +395,34 @@ impl App {
     }
 }
 
+fn set_panic_hook() {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = restore_terminal();
+        hook(info)
+    }));
+}
+
+fn init_terminal() -> io::Result<DefaultTerminal> {
+    set_panic_hook();
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen)?;
+    execute!(io::stdout(), EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(io::stdout());
+    Terminal::new(backend)
+}
+
+fn restore_terminal() -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(io::stdout(), LeaveAlternateScreen)?;
+    execute!(io::stdout(), DisableMouseCapture)?;
+    Ok(())
+}
+
 fn main() -> io::Result<()> {
-    let mut terminal = ratatui::init();
+    let mut terminal = init_terminal()?;
     let mut app = App::new();
-
     let app_result = app.run(&mut terminal);
-
-    ratatui::restore();
-
+    restore_terminal()?;
     app_result
 }

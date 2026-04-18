@@ -11,7 +11,8 @@ pub struct Shared {
     pub color: Mutex<ChatColor>,
     pub exit: AtomicBool,
     pub connection: AtomicBool,
-    pub popup: Mutex<Option<ActivePopup>>
+    pub popup: Mutex<Option<ActivePopup>>,
+    pub clients: Mutex<Vec<(String, ChatColor)>>
 }
 
 impl Default for Shared {
@@ -22,7 +23,8 @@ impl Default for Shared {
             color: Mutex::default(),
             name: Mutex::default(),
             connection: AtomicBool::default(),
-            popup: Mutex::default()
+            popup: Mutex::default(),
+            clients: Mutex::default()
         }
     }
 }

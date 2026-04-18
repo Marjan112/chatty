@@ -83,7 +83,11 @@ pub fn spawn_receiver(mut stream: TcpStream, shared: Arc<Shared>) -> JoinHandle<
                             shared.messages.lock().unwrap().clear();
                             let _ = stream.shutdown(Shutdown::Both);
                             shared.connection.store(false, Ordering::Relaxed);
-                            *shared.popup.lock().unwrap() = Some(ActivePopup::Info(String::from("Disconnected from the server")));
+
+                            let mut popup = shared.popup.lock().unwrap();
+                            if popup.is_none() {
+                                *popup = Some(ActivePopup::Info(String::from("Disconnected from the server")));
+                            }
                         }
                         _ => {
                             shared.connection.store(false, Ordering::Relaxed);

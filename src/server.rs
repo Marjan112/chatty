@@ -3,12 +3,10 @@ use mio::{
     Events, Interest, Poll, Token
 };
 use std::{
-    collections::HashMap,
-    error::Error,
     io::{self, Write, Read},
     net::SocketAddr,
     hash::{Hash, Hasher},
-    collections::hash_map::DefaultHasher
+    collections::{hash_map::{DefaultHasher, HashMap}}
 };
 use chrono::Local;
 
@@ -72,7 +70,7 @@ struct Server {
 impl Server {
     const LISTENING_ADDRESS: &'static str = "0.0.0.0:6741";
 
-    fn new() -> Result<Self, Box<dyn Error>> {
+    fn new() -> io::Result<Self> {
         let mut listener = TcpListener::bind(Self::LISTENING_ADDRESS.parse().unwrap()).map_err(|err| {
             eprintln!("ERROR: Failed to bind {}: {}", Self::LISTENING_ADDRESS, err);
             err
@@ -388,7 +386,7 @@ impl Server {
     }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> io::Result<()> {
     println!("INFO: ChaTTY server {CHATTY_VERSION}");
     let mut server = Server::new()?;
     server.listen();

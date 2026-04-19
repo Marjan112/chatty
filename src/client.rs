@@ -324,6 +324,8 @@ impl App {
                                 self.ui.chat_input_box.cut();
                             }
                         }
+                        KeyCode::PageUp => self.ui.chat_page_up(),
+                        KeyCode::PageDown => self.ui.chat_page_down(),
                         _ => {
                             if !self.shared.connection.load(Ordering::Relaxed) {
                                 match self.ui.connect_form.focused {

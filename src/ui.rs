@@ -170,18 +170,35 @@ impl ScrollState {
             .position(self.scroll);
     }
 
-    fn scroll_up(&mut self) {
-        self.scroll = self.scroll.saturating_sub(1);
+    fn scroll_up_by(&mut self, how_much: usize) {
+        self.scroll = self.scroll.saturating_sub(how_much);
         self.bar = self.bar.position(self.scroll);
         self.auto = false;
     }
 
-    fn scroll_down(&mut self) {
-        self.scroll = self.scroll.saturating_add(1);
+    fn scroll_down_by(&mut self, how_much: usize) {
+        self.scroll = self.scroll.saturating_add(how_much);
         self.bar = self.bar.position(self.scroll);
         if self.scroll >= self.max {
+            self.scroll = self.max;
             self.auto = true;
         }
+    }
+
+    fn scroll_up(&mut self) {
+        self.scroll_up_by(1);
+    }
+
+    fn scroll_down(&mut self) {
+        self.scroll_down_by(1);
+    }
+
+    fn page_up(&mut self, height: u16) {
+        self.scroll_up_by(height as usize);
+    }
+
+    fn page_down(&mut self, height: u16) {
+        self.scroll_down_by(height as usize);
     }
 }
 
@@ -395,6 +412,14 @@ impl Ui {
 
     pub fn client_list_scroll_down(&mut self) {
         self.client_list_scroll.scroll_down();
+    }
+
+    pub fn chat_page_up(&mut self) {
+        self.chat_scroll.page_up(self.chat_window_area.height);
+    }
+
+    pub fn chat_page_down(&mut self) {
+        self.chat_scroll.page_down(self.chat_window_area.height);
     }
 }
 

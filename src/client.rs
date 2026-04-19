@@ -11,7 +11,7 @@ use ratatui::{
     crossterm::{
         execute,
         terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-        event::{self, Event, KeyCode, KeyEventKind, MouseEventKind, EnableMouseCapture, DisableMouseCapture}
+        event::{self, Event, KeyCode, KeyEvent, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture}
     },
     style::{Color, Style},
     text::{Line, Span},
@@ -221,143 +221,145 @@ impl App {
         }
     }
 
+    fn handle_key_event(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                let mut popup = self.shared.popup.lock().unwrap();
+                if popup.is_some() {
+                    *popup = None;
+                } else {
+                    self.shared.exit.store(true, Ordering::Relaxed);
+                }
+            }
+            KeyCode::Tab if !self.shared.connection.load(Ordering::Relaxed) => self.ui.connect_form.next_field(),
+            KeyCode::Enter => {
+                if !self.shared.connection.load(Ordering::Relaxed) && self.shared.popup.lock().unwrap().is_none() {
+                    match self.ui.connect_form.focused {
+                        ConnectFormField::Address => self.ui.connect_form.next_field(),
+                        ConnectFormField::Name => {
+                            let address = self.ui.address_input_box.lines()[0].trim().to_string();
+                            let name = self.ui.name_input_box.lines()[0].trim().to_string();
+
+                            if address.is_empty() {
+                                self.ui.connect_form.focused = ConnectFormField::Address;
+                                return;
+                            }
+                            if name.is_empty() {
+                                return;
+                            }
+
+                            self.connect(address, name);
+
+                            self.ui.address_input_box.select_all();
+                            self.ui.address_input_box.cut();
+                            self.ui.name_input_box.select_all();
+                            self.ui.name_input_box.cut();
+
+                            self.ui.connect_form.focused = ConnectFormField::Address;
+                        }
+                    }
+                } else {
+                    let input = self.ui.chat_input_box.lines()[0].trim().to_string();
+
+                    if input.is_empty() {
+                        return;
+                    }
+
+                    if let Some(cmd) = input.strip_prefix("/") {
+                        let cmd_name = cmd.split_whitespace().next().unwrap_or("");
+                        let args = cmd.strip_prefix(cmd_name).unwrap_or("").trim();
+
+                        if let Some(command) = COMMANDS.iter().find(|c| c.name == cmd_name) {
+                            (command.run)(self, args);
+                        } else {
+                            let mut messages = self.shared.messages.lock().unwrap();
+                            messages.push(format!("CMD: Unknown command: {cmd_name}").into());
+                        }
+
+                        self.ui.chat_input_box.select_all();
+                        self.ui.chat_input_box.cut();
+
+                        return;
+                    }
+
+                    let message = Message::ClientMessage {
+                        name: String::new(),
+                        color: ChatColor::Reset,
+                        msg: input.clone(),
+                    };
+
+                    let timestamp_secs = chrono::Local::now().timestamp();
+
+                    let mut messages = self.shared.messages.lock().unwrap();
+
+                    match send_message(self.stream.as_mut().unwrap(), message, Some(timestamp_secs)) {
+                        Ok(_) => {
+                            let datetime = datetime_from_timestamp(timestamp_secs).to_string();
+                            let name = self.shared.name
+                                .lock()
+                                .unwrap()
+                                .to_owned();
+                            let color: Color = self.shared.color
+                                .lock()
+                                .unwrap()
+                                .to_owned()
+                                .into();
+                            messages.push(Line::from(vec![
+                                datetime.into(),
+                                " ".into(),
+                                Span::styled(name, Style::default().fg(color)),
+                                format!(": {input}").into()
+                            ]));
+                        }
+                        Err(err) => messages.push(format!("ERROR: Failed to send message: {err}").into())
+                    }
+
+                    self.ui.chat_input_box.select_all();
+                    self.ui.chat_input_box.cut();
+                }
+            }
+            KeyCode::PageUp => self.ui.chat_page_up(),
+            KeyCode::PageDown => self.ui.chat_page_down(),
+            _ => {
+                if !self.shared.connection.load(Ordering::Relaxed) {
+                    match self.ui.connect_form.focused {
+                        ConnectFormField::Address => { self.ui.address_input_box.input(key); }
+                        ConnectFormField::Name => { self.ui.name_input_box.input(key); }
+                    }
+                } else {
+                    self.ui.chat_input_box.input(key);
+                }
+            }
+        };
+    }
+
+    fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        let mouse_pos = (mouse.column, mouse.row).into();
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                if self.ui.chat_window_area.contains(mouse_pos) {
+                    self.ui.chat_scroll_up();
+                } else if self.ui.client_list_area.contains(mouse_pos) {
+                    self.ui.client_list_scroll_up();
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if self.ui.chat_window_area.contains(mouse_pos) {
+                    self.ui.chat_scroll_down();
+                } else if self.ui.client_list_area.contains(mouse_pos) {
+                    self.ui.client_list_scroll_down();
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn handle_events(&mut self, last_tick: &Instant) -> io::Result<()> {
         let timeout = Self::TICK_RATE.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
             match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    match key.code {
-                        KeyCode::Esc => {
-                            let mut popup = self.shared.popup.lock().unwrap();
-                            if popup.is_some() {
-                                *popup = None;
-                            } else {
-                                self.shared.exit.store(true, Ordering::Relaxed);
-                            }
-                        }
-                        KeyCode::Tab if !self.shared.connection.load(Ordering::Relaxed) => self.ui.connect_form.next_field(),
-                        KeyCode::Enter => {
-                            if !self.shared.connection.load(Ordering::Relaxed) {
-                                if self.shared.popup.lock().unwrap().is_none() {
-                                    match self.ui.connect_form.focused {
-                                        ConnectFormField::Address => self.ui.connect_form.next_field(),
-                                        ConnectFormField::Name => {
-                                            let address = self.ui.address_input_box.lines()[0].trim().to_string();
-                                            let name = self.ui.name_input_box.lines()[0].trim().to_string();
-
-                                            if address.is_empty() {
-                                                self.ui.connect_form.focused = ConnectFormField::Address;
-                                                return Ok(());
-                                            }
-                                            if name.is_empty() {
-                                                return Ok(());
-                                            }
-
-                                            self.connect(address, name);
-
-                                            self.ui.address_input_box.select_all();
-                                            self.ui.address_input_box.cut();
-                                            self.ui.name_input_box.select_all();
-                                            self.ui.name_input_box.cut();
-
-                                            self.ui.connect_form.focused = ConnectFormField::Address;
-                                        }
-                                    }
-                                }
-                            } else {
-                                let input = self.ui.chat_input_box.lines()[0].trim().to_string();
-
-                                if input.is_empty() {
-                                    return Ok(());
-                                }
-
-                                if let Some(cmd) = input.strip_prefix("/") {
-                                    let cmd_name = cmd.split_whitespace().next().unwrap_or("");
-                                    let args = cmd.strip_prefix(cmd_name).unwrap_or("").trim();
-
-                                    if let Some(command) = COMMANDS.iter().find(|c| c.name == cmd_name) {
-                                        (command.run)(self, args);
-                                    } else {
-                                        let mut messages = self.shared.messages.lock().unwrap();
-                                        messages.push(format!("CMD: Unknown command: {cmd_name}").into());
-                                    }
-
-                                    self.ui.chat_input_box.select_all();
-                                    self.ui.chat_input_box.cut();
-
-                                    return Ok(());
-                                }
-
-                                let message = Message::ClientMessage {
-                                    name: String::new(),
-                                    color: ChatColor::Reset,
-                                    msg: input.clone(),
-                                };
-
-                                let timestamp_secs = chrono::Local::now().timestamp();
-
-                                let mut messages = self.shared.messages.lock().unwrap();
-
-                                match send_message(self.stream.as_mut().unwrap(), message, Some(timestamp_secs)) {
-                                    Ok(_) => {
-                                        let datetime = datetime_from_timestamp(timestamp_secs).to_string();
-                                        let name = self.shared.name
-                                            .lock()
-                                            .unwrap()
-                                            .to_owned();
-                                        let color: Color = self.shared.color
-                                            .lock()
-                                            .unwrap()
-                                            .to_owned()
-                                            .into();
-                                        messages.push(Line::from(vec![
-                                            datetime.into(),
-                                            " ".into(),
-                                            Span::styled(name, Style::default().fg(color)),
-                                            format!(": {input}").into()
-                                        ]));
-                                    }
-                                    Err(err) => messages.push(format!("ERROR: Failed to send message: {err}").into())
-                                }
-
-                                self.ui.chat_input_box.select_all();
-                                self.ui.chat_input_box.cut();
-                            }
-                        }
-                        KeyCode::PageUp => self.ui.chat_page_up(),
-                        KeyCode::PageDown => self.ui.chat_page_down(),
-                        _ => {
-                            if !self.shared.connection.load(Ordering::Relaxed) {
-                                match self.ui.connect_form.focused {
-                                    ConnectFormField::Address => { self.ui.address_input_box.input(key); }
-                                    ConnectFormField::Name => { self.ui.name_input_box.input(key); }
-                                }
-                            } else {
-                                self.ui.chat_input_box.input(key);
-                            }
-                        }
-                    }
-                }
-                Event::Mouse(mouse) => {
-                    let mouse_pos = (mouse.column, mouse.row).into();
-                    match mouse.kind {
-                        MouseEventKind::ScrollUp => {
-                            if self.ui.chat_window_area.contains(mouse_pos) {
-                                self.ui.chat_scroll_up();
-                            } else if self.ui.client_list_area.contains(mouse_pos) {
-                                self.ui.client_list_scroll_up();
-                            }
-                        }
-                        MouseEventKind::ScrollDown => {
-                            if self.ui.chat_window_area.contains(mouse_pos) {
-                                self.ui.chat_scroll_down();
-                            } else if self.ui.client_list_area.contains(mouse_pos) {
-                                self.ui.client_list_scroll_down();
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+                Event::Key(key) if key.is_press() => self.handle_key_event(key),
+                Event::Mouse(mouse) => self.handle_mouse_event(mouse),
                 _ => {}
             }
         }
@@ -370,6 +372,8 @@ impl App {
         let mut get_client_list_timer = Instant::now();
 
         while !self.shared.exit.load(Ordering::Relaxed) {
+            self.handle_events(&last_tick)?;
+
             terminal.draw(|frame| {
                 if self.shared.connection.load(Ordering::Relaxed) {
                     self.ui.draw_chat(frame, &self.shared);
@@ -380,7 +384,6 @@ impl App {
                     }
                 }
             })?;
-            self.handle_events(&last_tick)?;
 
             if get_client_list_timer.elapsed() >= Duration::from_secs(1) {
                 if let Some(stream) = &mut self.stream {

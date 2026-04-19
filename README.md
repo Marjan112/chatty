@@ -6,6 +6,8 @@
 
 Chat app in the terminal
 
+Inspired by https://github.com/tsoding/4at
+
 ## Quick start
 
 ### Server

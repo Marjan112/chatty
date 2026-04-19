@@ -8,6 +8,9 @@ Chat app in the terminal
 
 Inspired by https://github.com/tsoding/4at
 
+> [!NOTE]
+> Please don't take the releases seriously, they're for my friends to check out and test the program.
+
 ## Quick start
 
 ### Server

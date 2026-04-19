@@ -20,13 +20,6 @@ pub fn greet_message() -> Vec<Line<'static>> {
             "!".into()
         ]),
         Line::from(vec![
-            "Use ".into(),
-            "UP".yellow(),
-            "/".into(),
-            "DOWN".yellow(),
-            " to scroll".into()
-        ]),
-        Line::from(vec![
             "Type and press ".into(),
             "ENTER".yellow(),
             " to send".into()

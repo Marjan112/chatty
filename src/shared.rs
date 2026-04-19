@@ -3,8 +3,8 @@ use ratatui::text::Line;
 
 use crate::ChatColor;
 use crate::ActivePopup;
-use crate::greet_message;
 
+#[derive(Default)]
 pub struct Shared {
     pub messages: Mutex<Vec<Line<'static>>>,
     pub name: Mutex<String>,
@@ -13,18 +13,4 @@ pub struct Shared {
     pub connection: AtomicBool,
     pub popup: Mutex<Option<ActivePopup>>,
     pub clients: Mutex<Vec<(String, ChatColor)>>
-}
-
-impl Default for Shared {
-    fn default() -> Self {
-        Self {
-            messages: Mutex::new(greet_message()),
-            exit: AtomicBool::default(),
-            color: Mutex::default(),
-            name: Mutex::default(),
-            connection: AtomicBool::default(),
-            popup: Mutex::default(),
-            clients: Mutex::default()
-        }
-    }
 }

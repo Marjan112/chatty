@@ -2,8 +2,9 @@ use std::{
     boxed::Box,
     io::{self, Write, Read},
     net::{TcpStream, Shutdown},
-    sync::{Arc, atomic::Ordering},
+    sync::{Arc, atomic::Ordering, mpsc::{self, Sender, Receiver}},
     time::{Duration, Instant},
+    thread
 };
 use ratatui::{
     Terminal,
@@ -185,6 +186,42 @@ fn init_handshake(stream: &mut TcpStream) -> io::Result<()> {
     Ok(())
 }
 
+fn set_panic_hook() {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = restore_terminal();
+        hook(info)
+    }));
+}
+
+fn init_terminal() -> io::Result<DefaultTerminal> {
+    set_panic_hook();
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen)?;
+    execute!(io::stdout(), EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(io::stdout());
+    Terminal::new(backend)
+}
+
+fn restore_terminal() -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(io::stdout(), LeaveAlternateScreen)?;
+    execute!(io::stdout(), DisableMouseCapture)?;
+    Ok(())
+}
+
+fn spawn_event_signaler(tx: Sender<Event>) {
+    thread::spawn(move || {
+        loop {
+            if let Ok(event) = event::read() {
+                if tx.send(event).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+}
+
 #[derive(Default)]
 struct App {
     ui: Ui,
@@ -193,12 +230,6 @@ struct App {
 }
 
 impl App {
-    const TICK_RATE: Duration = Duration::from_millis(250);
-
-    fn new() -> Self {
-        Default::default()
-    }
-
     fn connect(&mut self, address: String, name: String) {
         let stream_result = TcpStream::connect(address)
             .and_then(|mut stream| {
@@ -354,25 +385,25 @@ impl App {
         }
     }
 
-    fn handle_events(&mut self, last_tick: &Instant) -> io::Result<()> {
-        let timeout = Self::TICK_RATE.saturating_sub(last_tick.elapsed());
-        if event::poll(timeout)? {
-            match event::read()? {
+    fn handle_events(&mut self, rx: &Receiver<Event>) {
+        while let Ok(event) = rx.try_recv() {
+            match event {
                 Event::Key(key) if key.is_press() => self.handle_key_event(key),
                 Event::Mouse(mouse) => self.handle_mouse_event(mouse),
                 _ => {}
             }
         }
-
-        Ok(())
     }
 
-    fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
-        let mut last_tick = Instant::now();
+    fn run(&mut self) -> io::Result<()> {
+        let mut terminal = init_terminal()?;
         let mut get_client_list_timer = Instant::now();
+        let (tx, rx) = mpsc::channel();
+        
+        spawn_event_signaler(tx);
 
         while !self.shared.exit.load(Ordering::Relaxed) {
-            self.handle_events(&last_tick)?;
+            self.handle_events(&rx);
 
             terminal.draw(|frame| {
                 if self.shared.connection.load(Ordering::Relaxed) {
@@ -392,42 +423,21 @@ impl App {
                 get_client_list_timer = Instant::now();
             }
 
-            if last_tick.elapsed() >= Self::TICK_RATE {
-                last_tick = Instant::now();
-            }
+            // Render at 60 FPS
+            thread::sleep(Duration::from_millis(16));
         }
+
         Ok(())
     }
 }
 
-fn set_panic_hook() {
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
+impl Drop for App {
+    fn drop(&mut self) {
         let _ = restore_terminal();
-        hook(info)
-    }));
-}
-
-fn init_terminal() -> io::Result<DefaultTerminal> {
-    set_panic_hook();
-    enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
-    execute!(io::stdout(), EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(io::stdout());
-    Terminal::new(backend)
-}
-
-fn restore_terminal() -> io::Result<()> {
-    disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
-    execute!(io::stdout(), DisableMouseCapture)?;
-    Ok(())
+    }
 }
 
 fn main() -> io::Result<()> {
-    let mut terminal = init_terminal()?;
-    let mut app = App::new();
-    let app_result = app.run(&mut terminal);
-    restore_terminal()?;
-    app_result
+    App::default().run()?;
+    Ok(())
 }

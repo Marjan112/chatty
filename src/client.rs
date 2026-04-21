@@ -438,6 +438,5 @@ impl Drop for App {
 }
 
 fn main() -> io::Result<()> {
-    App::default().run()?;
-    Ok(())
+    App::default().run()
 }

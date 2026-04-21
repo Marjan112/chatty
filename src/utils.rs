@@ -5,6 +5,13 @@ use chrono::{format::{DelayedFormat, StrftimeItems}, Local, TimeZone};
 
 use crate::env::CHATTY_VERSION;
 
+#[macro_export]
+macro_rules! chat_error {
+    ($messages:expr, $($arg:tt)*) => {
+        $messages.push(Line::styled(format!("ERROR: {}", format!($($arg)*)), Style::default().fg(Color::LightRed)))
+    }
+}
+
 pub fn datetime_from_timestamp(secs: i64) -> DelayedFormat<StrftimeItems<'static>> {
     Local.timestamp_opt(secs, 0)
         .unwrap()

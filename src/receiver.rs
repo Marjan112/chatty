@@ -7,13 +7,16 @@ use std::{
 };
 use ratatui::{
     text::{Span, Line},
-    style::Style
+    style::{Style, Color}
 };
 
-use crate::message::*;
-use crate::shared::*;
-use crate::ActivePopup;
-use crate::datetime_from_timestamp;
+use crate::{
+    message::*,
+    shared::Shared,
+    ui::ActivePopup,
+    utils::datetime_from_timestamp,
+    chat_error
+};
 
 fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Shared) {
     let mut messages = shared.messages.lock().unwrap();
@@ -82,6 +85,10 @@ pub fn spawn_receiver(mut stream: TcpStream, shared: Arc<Shared>)  {
                             if popup.is_none() {
                                 *popup = Some(ActivePopup::Info(String::from("Disconnected from the server")));
                             }
+                        }
+                        io::ErrorKind::InvalidData => {
+                            let mut messages = shared.messages.lock().unwrap();
+                            chat_error!(messages, "Received invalid data. A new message kind was probably implemented and your client can't deserialize it. You should try updating your client.");
                         }
                         _ => {
                             shared.connection.store(false, Ordering::Relaxed);

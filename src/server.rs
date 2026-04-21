@@ -6,7 +6,7 @@ use std::{
     io::{self, Write, Read},
     net::SocketAddr,
     hash::{Hash, Hasher},
-    collections::{hash_map::{DefaultHasher, HashMap}}
+    collections::hash_map::{DefaultHasher, HashMap}
 };
 use chrono::Local;
 

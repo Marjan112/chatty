@@ -342,7 +342,7 @@ impl App {
                                 format!(": {input}").into()
                             ]));
                         }
-                        Err(err) => messages.push(format!("ERROR: Failed to send message: {err}").into())
+                        Err(err) => chat_error!(messages, "Failed to send message: {err}"),
                     }
 
                     self.ui.chat_input_box.select_all();
@@ -399,7 +399,7 @@ impl App {
         let mut terminal = init_terminal()?;
         let mut get_client_list_timer = Instant::now();
         let (tx, rx) = mpsc::channel();
-        
+
         spawn_event_signaler(tx);
 
         while !self.shared.exit.load(Ordering::Relaxed) {

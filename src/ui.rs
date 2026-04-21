@@ -365,7 +365,7 @@ impl Ui {
         let messages = shared.messages.lock().unwrap();
 
         let block = Block::bordered()
-            .title(" ChaTTY ".yellow())
+            .title(" Chat ".yellow())
             .title_alignment(HorizontalAlignment::Center);
 
         let chat = Paragraph::new(messages.clone())

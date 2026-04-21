@@ -55,8 +55,46 @@ impl Client {
         let _ = send_message(&mut self.stream, Message::ClientAssignedColor { color: self.color }, None);
     }
 
-    fn try_recv(&mut self) -> io::Result<Option<(i64, Message)>> {
-        receive_message(&mut self.stream, &mut self.buffer)
+    pub fn receive_message(&mut self) -> io::Result<Option<(i64, Message)>> {
+        loop {
+            if self.buffer.len() >= 12 {
+                let len = u32::from_le_bytes(self.buffer[8..12].try_into().unwrap()) as usize;
+                if self.buffer.len() >= 12 + len {
+                    break;
+                }
+            }
+
+            let mut temp = [0u8; 1024];
+            match self.stream.read(&mut temp) {
+                Ok(0) => return Err(io::Error::new(io::ErrorKind::ConnectionReset, "connection closed")),
+                Ok(n) => self.buffer.extend_from_slice(&temp[..n]),
+                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+                Err(err) => return Err(err)
+            }
+        }
+
+        if self.buffer.len() < 8 {
+            return Ok(None);
+        }
+        let timestamp = i64::from_le_bytes(self.buffer[0..8].try_into().unwrap());
+
+        if self.buffer.len() < 12 {
+            return Ok(None);
+        }
+        let len = u32::from_le_bytes(self.buffer[8..12].try_into().unwrap()) as usize;
+
+        if self.buffer.len() < 12 + len {
+            return Ok(None);
+        }
+
+        let msg_bytes = self.buffer[12..(12 + len)].to_vec();
+
+        self.buffer.drain(0..(12 + len));
+
+        let msg = postcard::from_bytes(&msg_bytes)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("failed to deserialize message: {err}")))?;
+
+        Ok(Some((timestamp, msg)))
     }
 }
 
@@ -307,7 +345,7 @@ impl Server {
                 break;
             }
             if let Some(client) = self.clients.get_mut(token) {
-                match client.try_recv() {
+                match client.receive_message() {
                     Ok(timestamp_message) => {
                         if let Some((timestamp_secs, message)) = timestamp_message {
                             match message {

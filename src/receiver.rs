@@ -1,9 +1,8 @@
 use std::{
-    io,
+    io::{self, Read},
     net::{TcpStream, Shutdown},
     thread,
-    sync::{atomic::Ordering, Arc},
-    time::Duration
+    sync::{atomic::Ordering, Arc}
 };
 use ratatui::{
     text::{Span, Line},
@@ -60,20 +59,32 @@ fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Share
     }
 }
 
+fn receive_message(stream: &mut TcpStream) -> io::Result<(i64, Message)> {
+    let mut timestamp_buf = [0u8; 8];
+    stream.read_exact(&mut timestamp_buf)?;
+    let timestamp = i64::from_le_bytes(timestamp_buf);
+
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let len = u32::from_le_bytes(len_buf);
+
+    let mut buf = vec![0u8; len as usize];
+    stream.read_exact(&mut buf)?;
+
+    let decoded = postcard::from_bytes(&buf).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+
+    Ok((timestamp, decoded))
+}
+
 pub fn spawn_receiver(mut stream: TcpStream, shared: Arc<Shared>)  {
     thread::spawn(move || {
-        let mut buffer = Vec::new();
-
         while shared.connection.load(Ordering::Relaxed) {
-            match receive_message(&mut stream, &mut buffer) {
-                Ok(Some((timestamp_secs, message))) => handle_incoming_message(timestamp_secs, message, &shared),
-                Ok(None) => thread::sleep(Duration::from_millis(1)),
-                Err(ref err)
-                    if err.kind() == io::ErrorKind::WouldBlock
-                        || err.kind() == io::ErrorKind::TimedOut => continue,
+            match receive_message(&mut stream) {
+                Ok((timestamp_secs, message)) => handle_incoming_message(timestamp_secs, message, &shared),
+                Err(ref err) if err.kind() == io::ErrorKind::TimedOut => continue,
                 Err(err) => {
                     match err.kind() {
-                        io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe => {
+                        io::ErrorKind::ConnectionReset | io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe => {
                             shared.connection.store(false, Ordering::Relaxed);
 
                             shared.messages.lock().unwrap().clear();

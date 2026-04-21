@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::{io::{self, Write, Read}, fmt};
+use std::{io::{self, Write}, fmt};
 use serde::{Serialize, Deserialize};
 
 use crate::ChatColor;
@@ -78,46 +78,4 @@ pub fn send_message<T: Write>(stream: &mut T, message: Message, timestamp_secs: 
     stream.write_all(&encoded)?;
 
     Ok(())
-}
-
-pub fn receive_message<T: Read>(stream: &mut T, buffer: &mut Vec<u8>) -> io::Result<Option<(i64, Message)>> {
-    loop {
-        if buffer.len() >= 12 {
-            let len = u32::from_le_bytes(buffer[8..12].try_into().unwrap()) as usize;
-            if buffer.len() >= 12 + len {
-                break;
-            }
-        }
-
-        let mut temp = [0u8; 1024];
-        match stream.read(&mut temp) {
-            Ok(0) => return Err(io::Error::new(io::ErrorKind::ConnectionReset, "connection closed")),
-            Ok(n) => buffer.extend_from_slice(&temp[..n]),
-            Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(None),
-            Err(err) => return Err(err)
-        }
-    }
-
-    if buffer.len() < 8 {
-        return Ok(None);
-    }
-    let timestamp = i64::from_le_bytes(buffer[0..8].try_into().unwrap());
-
-    if buffer.len() < 12 {
-        return Ok(None);
-    }
-    let len = u32::from_le_bytes(buffer[8..12].try_into().unwrap()) as usize;
-
-    if buffer.len() < 12 + len {
-        return Ok(None);
-    }
-
-    let msg_bytes = buffer[12..(12 + len)].to_vec();
-
-    buffer.drain(0..(12 + len));
-
-    let msg = postcard::from_bytes(&msg_bytes)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("failed to deserialize message: {err}")))?;
-
-    Ok(Some((timestamp, msg)))
 }

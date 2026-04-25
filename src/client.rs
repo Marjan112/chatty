@@ -11,8 +11,17 @@ use ratatui::{
     backend::CrosstermBackend,
     crossterm::{
         execute,
-        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-        event::{self, Event, KeyCode, KeyEvent, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture}
+        cursor::MoveTo,
+        terminal::{
+            EnterAlternateScreen, LeaveAlternateScreen,
+            disable_raw_mode, enable_raw_mode,
+            Clear, ClearType
+        },
+        event::{
+            self,
+            Event, KeyCode, KeyEvent, MouseEvent, MouseEventKind,
+            EnableMouseCapture, DisableMouseCapture
+        }
     },
     style::{Color, Style},
     text::{Line, Span},
@@ -198,6 +207,7 @@ fn init_terminal() -> io::Result<DefaultTerminal> {
     set_panic_hook();
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
+    execute!(io::stdout(), Clear(ClearType::All))?;
     execute!(io::stdout(), EnableMouseCapture)?;
     let backend = CrosstermBackend::new(io::stdout());
     Terminal::new(backend)
@@ -207,6 +217,8 @@ fn restore_terminal() -> io::Result<()> {
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)?;
     execute!(io::stdout(), DisableMouseCapture)?;
+    execute!(io::stdout(), Clear(ClearType::All))?;
+    execute!(io::stdout(), MoveTo(0, 0))?;
     Ok(())
 }
 

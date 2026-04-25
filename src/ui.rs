@@ -332,12 +332,12 @@ impl Ui {
     }
 
     fn draw_client_list(&mut self, frame: &mut Frame, shared: &Shared) {
-        let block = Block::bordered()
-            .title(" Clients ".yellow())
-            .title_alignment(HorizontalAlignment::Center);
-
         let lock = shared.clients.lock().unwrap();
         let mut clients = Vec::with_capacity(lock.len());
+
+        let block = Block::bordered()
+            .title(format!(" Clients ({}) ", lock.len()).yellow())
+            .title_alignment(HorizontalAlignment::Center);
 
         for (name, color) in lock.iter() {
             let line = Line::styled(

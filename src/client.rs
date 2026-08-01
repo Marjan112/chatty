@@ -199,7 +199,8 @@ fn set_panic_hook() {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = restore_terminal();
-        hook(info)
+        hook(info);
+        std::process::exit(1);
     }));
 }
 

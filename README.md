@@ -9,7 +9,7 @@ Chat app in the terminal
 Inspired by https://github.com/tsoding/4at
 
 > [!NOTE]
-> Please don't take the releases seriously, they're for my friends to check out and test the program.
+> The development version of the application (commit after the latest release) is **extremely** unstable and unsafe, you should use released versions which are still unstable **AND** unsafe but a little less.
 
 https://github.com/user-attachments/assets/e77a01c6-5a09-4b68-b321-07c9cfd29a5f
 

@@ -27,6 +27,7 @@ use ratatui::{
     text::{Line, Span},
     DefaultTerminal,
 };
+use clap::Parser;
 
 mod chat_color;
 use chat_color::*;
@@ -47,6 +48,8 @@ use ui::*;
 
 mod utils;
 use utils::*;
+
+use crate::env::CHATTY_VERSION;
 
 fn exit_app(app: &mut App, _: &str) {
     app.shared.exit.store(true, Ordering::Relaxed);
@@ -275,7 +278,44 @@ impl App {
                     self.shared.exit.store(true, Ordering::Relaxed);
                 }
             }
-            KeyCode::Tab if !self.shared.connection.load(Ordering::Relaxed) => self.ui.connect_form.next_field(),
+            KeyCode::Tab => {
+                if self.shared.connection.load(Ordering::Relaxed) {
+                    if let Some(completion) = &mut self.ui.completion_state {
+                        completion.next(); 
+
+                        if let Some(cmd) = completion.selected() {
+                            self.ui.chat_prompt.set_text(format!("/{cmd}"));
+                        }
+                    } else {
+                        let current_input = self.ui.chat_prompt.textarea.lines()[0].trim();
+                        if current_input.starts_with('/') && !current_input.contains(' ') {
+                            let input_cmd = &current_input[1..];
+
+                            let matches: Vec<&str> = COMMANDS
+                                .iter()
+                                .filter(|cmd| cmd.name.starts_with(input_cmd))
+                                .map(|cmd| cmd.name)
+                                .collect();
+
+                            match matches.len() {
+                                0 => {}
+                                1 => self.ui.chat_prompt.set_text(format!("/{}", matches[0])),
+                                _ => {
+                                    let completion_state = CompletionState::new(matches);
+
+                                    if let Some(cmd) = completion_state.selected() {
+                                        self.ui.chat_prompt.set_text(format!("/{cmd}"));
+                                    }
+
+                                    self.ui.completion_state = Some(completion_state);
+                                }
+                            }
+                        }
+                    }
+                } else if self.shared.popup.lock().unwrap().is_none() {
+                    self.ui.connect_form.next_field();
+                }
+            }
             KeyCode::Enter => {
                 if !self.shared.connection.load(Ordering::Relaxed) && self.shared.popup.lock().unwrap().is_none() {
                     match self.ui.connect_form.focused {
@@ -294,20 +334,22 @@ impl App {
 
                             self.connect(address, name);
 
-                            self.ui.address_input_box.select_all();
-                            self.ui.address_input_box.cut();
-                            self.ui.name_input_box.select_all();
-                            self.ui.name_input_box.cut();
+                            self.ui.address_input_box.clear();
+                            self.ui.name_input_box.clear();
 
                             self.ui.connect_form.focused = ConnectFormField::Address;
                         }
                     }
                 } else {
-                    let input = self.ui.chat_input_box.lines()[0].trim().to_string();
+                    self.ui.completion_state = None;
+
+                    let input = self.ui.chat_prompt.textarea.lines()[0].trim().to_string();
 
                     if input.is_empty() {
                         return;
                     }
+
+                    self.ui.chat_prompt.add_to_history(input.clone());
 
                     if let Some(cmd) = input.strip_prefix("/") {
                         let cmd_name = cmd.split_whitespace().next().unwrap_or("");
@@ -320,8 +362,7 @@ impl App {
                             messages.push(format!("CMD: Unknown command: {cmd_name}").into());
                         }
 
-                        self.ui.chat_input_box.select_all();
-                        self.ui.chat_input_box.cut();
+                        self.ui.chat_prompt.textarea.clear();
 
                         return;
                     }
@@ -358,12 +399,13 @@ impl App {
                         Err(err) => chat_error!(messages, "Failed to send message: {err}"),
                     }
 
-                    self.ui.chat_input_box.select_all();
-                    self.ui.chat_input_box.cut();
+                    self.ui.chat_prompt.textarea.clear();
                 }
             }
             KeyCode::PageUp => self.ui.chat_page_up(),
             KeyCode::PageDown => self.ui.chat_page_down(),
+            KeyCode::Up => self.ui.chat_prompt.history_prev(),
+            KeyCode::Down => self.ui.chat_prompt.history_next(),
             _ => {
                 if !self.shared.connection.load(Ordering::Relaxed) {
                     match self.ui.connect_form.focused {
@@ -371,7 +413,8 @@ impl App {
                         ConnectFormField::Name => { self.ui.name_input_box.input(key); }
                     }
                 } else {
-                    self.ui.chat_input_box.input(key);
+                    self.ui.completion_state = None;
+                    self.ui.chat_prompt.textarea.input(key);
                 }
             }
         };
@@ -422,9 +465,10 @@ impl App {
                 if self.shared.connection.load(Ordering::Relaxed) {
                     self.ui.draw_chat(frame, &self.shared);
                 } else {
-                    self.ui.draw_connect_form(frame);
                     if let Some(popup) = self.shared.popup.lock().unwrap().as_ref() {
                         popup.draw(frame);
+                    } else {
+                        self.ui.draw_connect_form(frame);
                     }
                 }
             })?;
@@ -450,6 +494,11 @@ impl Drop for App {
     }
 }
 
+#[derive(Parser)]
+#[command(version = CHATTY_VERSION)]
+struct Args;
+
 fn main() -> io::Result<()> {
+    let _ = Args::parse();
     App::default().run()
 }

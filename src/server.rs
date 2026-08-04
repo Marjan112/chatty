@@ -9,6 +9,7 @@ use std::{
     collections::hash_map::{DefaultHasher, HashMap}
 };
 use chrono::Local;
+use clap::Parser;
 
 mod chat_color;
 use chat_color::*;
@@ -424,7 +425,12 @@ impl Server {
     }
 }
 
+#[derive(Parser)]
+#[command(version = CHATTY_VERSION)]
+struct Args;
+
 fn main() -> io::Result<()> {
+    let _ = Args::parse();
     println!("INFO: ChaTTY server {CHATTY_VERSION}");
     let mut server = Server::new()?;
     server.listen();

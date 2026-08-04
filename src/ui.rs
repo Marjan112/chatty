@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Layout, HorizontalAlignment, Constraint, Rect, Flex},
-    widgets::{Block, Borders, Paragraph, Wrap, Scrollbar, ScrollbarState, ScrollbarOrientation, Widget, Clear},
+    widgets::{Block, Borders, Paragraph, Wrap, Scrollbar, ScrollbarState, ScrollbarOrientation, Widget, Clear, ListState},
     style::{Style, Stylize, Color},
     text::{Span, Line, Text},
     buffer::Buffer,
@@ -148,12 +148,22 @@ impl ConnectForm {
     }
 }
 
-#[derive(Default)]
 struct ScrollState {
     bar: ScrollbarState,
     scroll: usize,
     max: usize,
     auto: bool
+}
+
+impl Default for ScrollState {
+    fn default() -> Self {
+        Self {
+            bar: ScrollbarState::default(),
+            scroll: 0,
+            max: 0,
+            auto: true
+        }
+    }
 }
 
 impl ScrollState {
@@ -202,15 +212,123 @@ impl ScrollState {
     }
 }
 
+#[derive(Default)]
+pub struct Prompt {
+    pub textarea: TextArea<'static>,
+    history: Vec<String>,
+    history_index: Option<usize>,
+    saved_input: String
+}
+
+impl Prompt {
+    pub fn set_text<T: AsRef<str>>(&mut self, text: T) {
+        self.textarea.clear();
+        self.textarea.insert_str(text);
+    }
+
+    pub fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+
+        match self.history_index {
+            None => {
+                self.saved_input = self.textarea.lines().join("");
+                self.history_index = Some(self.history.len() - 1);
+            }
+            Some(0) => return,
+            Some(index) => {
+                self.history_index = Some(index - 1);
+            }
+        } 
+
+        self.load_history();
+    }
+
+    pub fn history_next(&mut self) {
+        match self.history_index {
+            None => return,
+            Some(index) if index < self.history.len() - 1 => {
+                self.history_index = Some(index + 1);
+                self.load_history();
+            }
+            Some(_) => {
+                self.history_index = None;
+
+                self.textarea.clear();
+                self.textarea.insert_str(&self.saved_input);
+
+                self.saved_input.clear();
+            }
+        }
+    }
+
+    pub fn add_to_history(&mut self, input: String) {
+        if self.history.last() != Some(&input) {
+            self.history.push(input);
+        }
+
+        self.history_index = None;
+        self.saved_input.clear();
+    }
+
+    fn load_history(&mut self) {
+        if let Some(index) = self.history_index {
+            self.textarea.clear();
+            self.textarea.insert_str(&self.history[index]);
+        }
+    }
+}
+
+// TODO: draw the completion matches in a list
+pub struct CompletionState {
+    matches: Vec<&'static str>,
+    state: ListState,
+}
+
+impl CompletionState {
+    pub fn new(matches: Vec<&'static str>) -> Self {
+        let mut state = ListState::default();
+        if !matches.is_empty() {
+            state.select(Some(0));
+        }
+
+        Self {
+            matches,
+            state 
+        }
+    }
+
+    pub fn next(&mut self) {
+        if self.matches.is_empty() {
+            return;
+        }
+
+        let index = self.state
+            .selected()
+            .unwrap_or_default();
+
+        self.state.select(Some((index + 1) % self.matches.len()));
+    }
+
+    pub fn selected(&self) -> Option<&str> {
+        self.state
+            .selected()
+            .map(|i| self.matches[i])
+    }
+}
+
+#[derive(Default)]
 pub struct Ui {
     pub address_input_box: TextArea<'static>,
     pub name_input_box: TextArea<'static>,
-    pub chat_input_box: TextArea<'static>,
+    pub chat_prompt: Prompt,
     chat_scroll: ScrollState,
     client_list_scroll: ScrollState,
     pub connect_form: ConnectForm,
     pub chat_window_area: Rect,
-    pub client_list_area: Rect
+    pub client_list_area: Rect,
+    pub completion_state: Option<CompletionState>
 }
 
 impl Ui {
@@ -219,7 +337,7 @@ impl Ui {
             .flex(Flex::Center)
             .areas(frame.area());
 
-        let [horizontal] = Layout::horizontal([Constraint::Max(40)])
+        let [horizontal] = Layout::horizontal([Constraint::Percentage(40)])
             .flex(Flex::Center)
             .areas(vertical);
 
@@ -391,11 +509,11 @@ impl Ui {
             .title(vec![" You (".into(), Span::styled(name, Style::default().fg(color)), "): ".into()])
             .yellow();
 
-        self.chat_input_box.set_block(block);
-        self.chat_input_box.set_cursor_line_style(Style::default().fg(Color::Reset));
-        self.chat_input_box.set_placeholder_text("Your message...");
+        self.chat_prompt.textarea.set_block(block);
+        self.chat_prompt.textarea.set_cursor_line_style(Style::default().fg(Color::Reset));
+        self.chat_prompt.textarea.set_placeholder_text("Your message...");
 
-        frame.render_widget(&self.chat_input_box, input_box_area);
+        frame.render_widget(&self.chat_prompt.textarea, input_box_area);
     }
 
     pub fn chat_scroll_up(&mut self) {
@@ -420,23 +538,5 @@ impl Ui {
 
     pub fn chat_page_down(&mut self) {
         self.chat_scroll.page_down(self.chat_window_area.height);
-    }
-}
-
-impl Default for Ui {
-    fn default() -> Self {
-        Self {
-            connect_form: ConnectForm::default(),
-            address_input_box: TextArea::default(),
-            name_input_box: TextArea::default(),
-            chat_input_box: TextArea::default(),
-            chat_scroll: ScrollState {
-                auto: true,
-                ..Default::default()
-            },
-            client_list_scroll: ScrollState::default(),
-            chat_window_area: Rect::default(),
-            client_list_area: Rect::default()
-        }
     }
 }

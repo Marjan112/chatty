@@ -274,18 +274,22 @@ impl App {
                 let mut popup = self.shared.popup.lock().unwrap();
                 if popup.is_some() {
                     *popup = None;
+                } else if self.ui.chat_prompt.completion_state.is_some() {
+                    self.ui.chat_prompt.completion_state = None;
                 } else {
                     self.shared.exit.store(true, Ordering::Relaxed);
                 }
             }
             KeyCode::Tab => {
                 if self.shared.connection.load(Ordering::Relaxed) {
-                    if let Some(completion) = &mut self.ui.completion_state {
-                        completion.next(); 
+                    let selected = if let Some(completion) = &mut self.ui.chat_prompt.completion_state {
+                        completion.next().map(str::to_owned)
+                    } else {
+                        None
+                    };
 
-                        if let Some(cmd) = completion.selected() {
-                            self.ui.chat_prompt.set_text(format!("/{cmd}"));
-                        }
+                    if let Some(cmd) = selected {
+                        self.ui.chat_prompt.set_text(format!("/{cmd}"));
                     } else {
                         let current_input = self.ui.chat_prompt.textarea.lines()[0].trim();
                         if current_input.starts_with('/') && !current_input.contains(' ') {
@@ -307,7 +311,7 @@ impl App {
                                         self.ui.chat_prompt.set_text(format!("/{cmd}"));
                                     }
 
-                                    self.ui.completion_state = Some(completion_state);
+                                    self.ui.chat_prompt.completion_state = Some(completion_state);
                                 }
                             }
                         }
@@ -341,7 +345,7 @@ impl App {
                         }
                     }
                 } else {
-                    self.ui.completion_state = None;
+                    self.ui.chat_prompt.completion_state = None;
 
                     let input = self.ui.chat_prompt.textarea.lines()[0].trim().to_string();
 
@@ -413,7 +417,7 @@ impl App {
                         ConnectFormField::Name => { self.ui.name_input_box.input(key); }
                     }
                 } else {
-                    self.ui.completion_state = None;
+                    self.ui.chat_prompt.completion_state = None;
                     self.ui.chat_prompt.textarea.input(key);
                 }
             }

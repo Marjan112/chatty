@@ -1,12 +1,12 @@
 use ratatui::{
-    layout::{Layout, HorizontalAlignment, Constraint, Rect, Flex},
-    widgets::{Block, Borders, Paragraph, Wrap, Scrollbar, ScrollbarState, ScrollbarOrientation, Widget, Clear, ListState},
+    layout::{Layout, HorizontalAlignment, Constraint, Rect, Flex, Margin},
+    widgets::{Block, Borders, Paragraph, Wrap, Scrollbar, ScrollbarState, ScrollbarOrientation, Widget, Clear, List, ListState},
     style::{Style, Stylize, Color},
     text::{Span, Line, Text},
     buffer::Buffer,
     Frame
 };
-use ratatui_textarea::TextArea;
+use ratatui_textarea::{DataCursor, TextArea};
 
 use crate::Shared;
 use crate::env::CHATTY_VERSION;
@@ -157,16 +157,20 @@ struct ScrollState {
 
 impl Default for ScrollState {
     fn default() -> Self {
-        Self {
-            bar: ScrollbarState::default(),
-            scroll: 0,
-            max: 0,
-            auto: true
-        }
+        Self::new(true)
     }
 }
 
 impl ScrollState {
+    fn new(auto: bool) -> Self {
+        Self {
+            bar: ScrollbarState::default(),
+            scroll: 0,
+            max: 0,
+            auto
+        }
+    }
+
     fn update_from_paragraph(&mut self, paragraph: &Paragraph<'_>, area: Rect) {
         let line_count = paragraph.line_count(area.width - 2);
         let visible_lines = area.height as usize;
@@ -212,12 +216,55 @@ impl ScrollState {
     }
 }
 
+pub struct CompletionState {
+    matches: Vec<&'static str>,
+    list_state: ListState,
+    scrollbar_state: ScrollbarState
+}
+
+impl CompletionState {
+    pub fn new(matches: Vec<&'static str>) -> Self {
+        let mut list_state = ListState::default();
+        if !matches.is_empty() {
+            list_state.select(Some(0));
+        }
+
+        Self {
+            matches,
+            list_state,
+            scrollbar_state: ScrollbarState::default()
+        }
+    }
+
+    pub fn next(&mut self) -> Option<&str> {
+        if self.matches.is_empty() {
+            return None;
+        }
+
+        let index = self.list_state
+            .selected()
+            .unwrap_or_default();
+
+        let next_index = (index + 1) % self.matches.len();
+
+        self.list_state.select(Some(next_index));
+        Some(self.matches[next_index])
+    }
+
+    pub fn selected(&self) -> Option<&str> {
+        self.list_state
+            .selected()
+            .map(|i| self.matches[i])
+    }
+}
+
 #[derive(Default)]
 pub struct Prompt {
     pub textarea: TextArea<'static>,
     history: Vec<String>,
     history_index: Option<usize>,
-    saved_input: String
+    saved_input: String,
+    pub completion_state: Option<CompletionState>
 }
 
 impl Prompt {
@@ -280,44 +327,6 @@ impl Prompt {
     }
 }
 
-// TODO: draw the completion matches in a list
-pub struct CompletionState {
-    matches: Vec<&'static str>,
-    state: ListState,
-}
-
-impl CompletionState {
-    pub fn new(matches: Vec<&'static str>) -> Self {
-        let mut state = ListState::default();
-        if !matches.is_empty() {
-            state.select(Some(0));
-        }
-
-        Self {
-            matches,
-            state 
-        }
-    }
-
-    pub fn next(&mut self) {
-        if self.matches.is_empty() {
-            return;
-        }
-
-        let index = self.state
-            .selected()
-            .unwrap_or_default();
-
-        self.state.select(Some((index + 1) % self.matches.len()));
-    }
-
-    pub fn selected(&self) -> Option<&str> {
-        self.state
-            .selected()
-            .map(|i| self.matches[i])
-    }
-}
-
 #[derive(Default)]
 pub struct Ui {
     pub address_input_box: TextArea<'static>,
@@ -327,13 +336,12 @@ pub struct Ui {
     client_list_scroll: ScrollState,
     pub connect_form: ConnectForm,
     pub chat_window_area: Rect,
-    pub client_list_area: Rect,
-    pub completion_state: Option<CompletionState>
+    pub client_list_area: Rect
 }
 
 impl Ui {
     pub fn draw_connect_form(&mut self, frame: &mut Frame) {
-        let [vertical] = Layout::vertical([Constraint::Max(10)])
+        let [vertical] = Layout::vertical([Constraint::Length(10)])
             .flex(Flex::Center)
             .areas(frame.area());
 
@@ -424,10 +432,10 @@ impl Ui {
         *  |________________________________________________|
         */
 
-        // Split the screen in top and bottom (`top_area` and `input_box_area`) and then later split
+        // Split the screen in top and bottom (`top_area` and `chat_prompt_area`) and then later split
         // the `top_area` to `chat_window_area` and `client_list_area`
 
-        let [top_area, input_box_area] = Layout::vertical([
+        let [top_area, chat_prompt_area] = Layout::vertical([
             Constraint::Min(3),
             Constraint::Length(3)
         ])
@@ -446,7 +454,7 @@ impl Ui {
 
         self.draw_chat_window(frame, shared);
         self.draw_client_list(frame, shared);
-        self.draw_chat_input_box(frame, input_box_area, shared);
+        self.draw_chat_prompt(frame, chat_prompt_area, shared);
     }
 
     fn draw_client_list(&mut self, frame: &mut Frame, shared: &Shared) {
@@ -501,7 +509,7 @@ impl Ui {
         );
     }
 
-    fn draw_chat_input_box(&mut self, frame: &mut Frame, input_box_area: Rect, shared: &Shared) {
+    fn draw_chat_prompt(&mut self, frame: &mut Frame, chat_prompt_area: Rect, shared: &Shared) {
         let name = shared.name.lock().unwrap().to_owned();
         let color: Color = shared.color.lock().unwrap().to_owned().into();
 
@@ -513,7 +521,68 @@ impl Ui {
         self.chat_prompt.textarea.set_cursor_line_style(Style::default().fg(Color::Reset));
         self.chat_prompt.textarea.set_placeholder_text("Your message...");
 
-        frame.render_widget(&self.chat_prompt.textarea, input_box_area);
+        frame.render_widget(&self.chat_prompt.textarea, chat_prompt_area);
+        
+        self.draw_completion_popup(frame, chat_prompt_area);
+    }
+
+    fn draw_completion_popup(&mut self, frame: &mut Frame, chat_prompt_area: Rect) {
+        if let Some(completion) = &mut self.chat_prompt.completion_state {
+            if completion.matches.is_empty() {
+                return;
+            }
+
+            let DataCursor(cursor_x, _) = self.chat_prompt.textarea.cursor();
+            let inner = chat_prompt_area.inner(Margin {
+                horizontal: 1,
+                vertical: 1
+            });
+
+            let cursor_screen_x = inner.x + cursor_x as u16;
+            let cursor_screen_y = inner.y; 
+
+            let popup_width = completion.matches
+                .iter()
+                .map(|m| m.len())
+                .max()
+                .unwrap_or(0) as u16
+                + 2;
+
+            let popup_height = completion.matches.len().min(8) as u16;
+
+            let popup_area = Rect {
+                x: cursor_screen_x,
+                y: cursor_screen_y - popup_height,
+                width: popup_width + 1,
+                height: popup_height
+            };
+
+            let [list_area, scrollbar_area] = Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(popup_area);
+
+            let list_widget = List::new(completion.matches.clone())
+                .style(Color::White)
+                .highlight_style(Style::default()
+                    .bg(Color::Yellow)
+                    .fg(Color::Black));
+
+            frame.render_widget(Clear, popup_area);
+
+            frame.render_stateful_widget(list_widget, list_area, &mut completion.list_state);
+
+            completion.scrollbar_state = completion.scrollbar_state
+                .content_length(completion.matches.len().saturating_sub(list_area.height as usize))
+                .viewport_content_length(list_area.height as usize)
+                .position(completion.list_state.offset());
+
+            frame.render_stateful_widget(
+                Scrollbar::default()
+                    .begin_symbol(None)
+                    .end_symbol(None)
+                    .track_symbol(None)
+                ,scrollbar_area,
+                &mut completion.scrollbar_state
+            );
+        }
     }
 
     pub fn chat_scroll_up(&mut self) {

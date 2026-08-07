@@ -21,10 +21,9 @@ pub fn datetime_from_timestamp(secs: i64) -> DelayedFormat<StrftimeItems<'static
 pub fn greet_message() -> Vec<Line<'static>> {
     vec![
         Line::from(vec![
-            "Welcome to ".into(),
             "ChaTTY ".yellow(),
-            CHATTY_VERSION.yellow(),
-            "!".into()
+            "client ".into(),
+            CHATTY_VERSION.yellow()
         ]),
         Line::from(vec![
             "Type and press ".into(),

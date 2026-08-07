@@ -1,7 +1,7 @@
 use std::{
     boxed::Box,
     io::{self, Write, Read},
-    net::{TcpStream, Shutdown},
+    net::{TcpStream, Shutdown, SocketAddr, ToSocketAddrs},
     sync::{Arc, atomic::Ordering, mpsc::{self, Sender, Receiver}},
     time::{Duration, Instant},
     thread
@@ -27,7 +27,7 @@ use ratatui::{
     text::{Line, Span},
     DefaultTerminal,
 };
-use clap::Parser;
+use clap::{Parser, builder::NonEmptyStringValueParser};
 
 mod chat_color;
 use chat_color::*;
@@ -53,6 +53,35 @@ use crate::env::CHATTY_VERSION;
 
 fn exit_app(app: &mut App, _: &str) {
     app.shared.exit.store(true, Ordering::Relaxed);
+}
+
+fn validate_name(name: &str) -> Result<String, &'static str> {
+    let trimmed = name.trim();
+
+    if trimmed.is_empty() {
+        return Err("name cannot be empty");
+    }
+    if trimmed.len() > 25 {
+        return Err("name is too long");
+    }
+    if !trimmed.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '_' || c == '-') {
+        return Err("name must be alphanumeric, can contain dots, underscores and dashes");
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn validate_address(address: &str) -> Result<SocketAddr, String> {
+    let trimmed = address.trim();
+
+    if trimmed.is_empty() {
+        return Err("address cannot be empty".into());
+    }
+
+    match trimmed.to_socket_addrs() {
+        Ok(mut addrs) => addrs.next().ok_or_else(|| format!("could not resolve address `{trimmed}`")),
+        Err(err) => Err(format!("invalid address `{trimmed}`: {err}"))
+    }
 }
 
 struct Command {
@@ -96,20 +125,25 @@ const COMMANDS: &[Command] = &[
                 return;
             }
 
-            if new_name == *current_name {
-                messages.push(format!("name: your display name is already '{new_name}'").into());
-                return;
-            }
+            match validate_name(&new_name) {
+                Ok(new_name_validated) => {
+                    if new_name_validated == *current_name {
+                        messages.push(format!("name: your display name is already `{new_name}`").into());
+                        return;
+                    }
 
-            let old_name = current_name.clone();
+                    let old_name = current_name.clone();
 
-            *current_name = new_name.to_string();
+                    *current_name = new_name_validated.clone();
 
-            if let Some(stream) = &mut app.stream {
-                if let Err(err) = send_message(stream, Message::ClientWantNewName { new_name: new_name.to_string() }, None) {
-                    messages.push(format!("name: failed to change your display name: {err}").into());
-                    *current_name = old_name;
+                    if let Some(stream) = &mut app.stream {
+                        if let Err(err) = send_message(stream, Message::ClientWantNewName { new_name: new_name_validated }, None) {
+                            messages.push(format!("name: failed to change your display name: {err}").into());
+                            *current_name = old_name;
+                        }
+                    }
                 }
+                Err(err) => messages.push(format!("name: failed to change your display name: {err}").into())
             }
         }
     },
@@ -152,7 +186,7 @@ const COMMANDS: &[Command] = &[
                         Span::styled(current_color.to_string(), Style::default().fg(current_color))
                     ]));
                 }
-                Err(err) => messages.push(format!("color: failed to change your color to '{new_color}': {err}").into())
+                Err(_) => messages.push(format!("color: `{new_color}` not supported, maybe try hex code for that color?").into())
             }
         }
     },
@@ -217,12 +251,22 @@ fn init_terminal() -> io::Result<DefaultTerminal> {
     Terminal::new(backend)
 }
 
+fn is_term_linux() -> bool {
+    std::env::var("TERM")
+        .map(|t| t == "linux")
+        .unwrap_or(false)
+}
+
 fn restore_terminal() -> io::Result<()> {
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)?;
     execute!(io::stdout(), DisableMouseCapture)?;
-    execute!(io::stdout(), Clear(ClearType::All))?;
-    execute!(io::stdout(), MoveTo(0, 0))?;
+
+    if is_term_linux() {
+        execute!(io::stdout(), Clear(ClearType::All))?;
+        execute!(io::stdout(), MoveTo(0, 0))?;
+    }
+
     Ok(())
 }
 
@@ -246,26 +290,43 @@ struct App {
 }
 
 impl App {
-    fn connect(&mut self, address: String, name: String) {
-        let stream_result = TcpStream::connect(address)
-            .and_then(|mut stream| {
-                stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-                stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-                init_handshake(&mut stream)?;
-                send_message(&mut stream, Message::ClientConnected { name: name.clone(), color: ChatColor::Reset }, None)?;
-                spawn_receiver(stream.try_clone()?, self.shared.clone());
-                Ok(stream)
-            });
+    fn connect(&mut self, address: SocketAddr, name: String) -> io::Result<()> {
+        let timeout = Duration::from_secs(5);
 
-        match stream_result {
-            Ok(stream) => {
-                self.stream = Some(stream);
-                self.shared.connection.store(true, Ordering::Relaxed);
-                *self.shared.name.lock().unwrap() = name;
-                *self.shared.messages.lock().unwrap() = greet_message();
-            }
-            Err(err) => *self.shared.popup.lock().unwrap() = Some(ActivePopup::Error(format!("Failed to connect: {err}")))
-        }
+        let mut stream = TcpStream::connect_timeout(&address, timeout)?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+
+        init_handshake(&mut stream)?;
+        send_message(
+            &mut stream,
+            Message::ClientConnected {
+                name: name.clone(),
+                color: ChatColor::Reset
+            },
+            None
+        )?;
+
+        spawn_receiver(stream.try_clone()?, self.shared.clone());
+
+        self.stream = Some(stream);
+        self.shared.connection.store(true, Ordering::Relaxed);
+        *self.shared.name.lock().unwrap() = name;
+        *self.shared.messages.lock().unwrap() = greet_message();
+
+        Ok(())
+    }
+
+    fn connect_with(&mut self, address: &str, name: &str) -> io::Result<()> {
+        let address = validate_address(address).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+        let name = validate_name(name).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+        self.connect(address, name)
+    }
+
+    fn connect_from_ui(&mut self) -> Result<(), String> {
+        let address = validate_address(&self.ui.address_input_box.lines()[0])?;
+        let name = validate_name(&self.ui.name_input_box.lines()[0])?;
+        self.connect(address, name).map_err(|err| err.to_string())
     }
 
     fn handle_key_event(&mut self, key: KeyEvent) {
@@ -325,23 +386,9 @@ impl App {
                     match self.ui.connect_form.focused {
                         ConnectFormField::Address => self.ui.connect_form.next_field(),
                         ConnectFormField::Name => {
-                            let address = self.ui.address_input_box.lines()[0].trim().to_string();
-                            let name = self.ui.name_input_box.lines()[0].trim().to_string();
-
-                            if address.is_empty() {
-                                self.ui.connect_form.focused = ConnectFormField::Address;
-                                return;
+                            if let Err(err) = self.connect_from_ui() {
+                                *self.shared.popup.lock().unwrap() = Some(ActivePopup::Error(format!("Failed to connect: {err}")));
                             }
-                            if name.is_empty() {
-                                return;
-                            }
-
-                            self.connect(address, name);
-
-                            self.ui.address_input_box.clear();
-                            self.ui.name_input_box.clear();
-
-                            self.ui.connect_form.focused = ConnectFormField::Address;
                         }
                     }
                 } else {
@@ -477,32 +524,41 @@ impl App {
                 }
             })?;
 
-            if get_client_list_timer.elapsed() >= Duration::from_secs(1) {
-                if let Some(stream) = &mut self.stream {
+            if let Some(stream) = &mut self.stream {
+                if get_client_list_timer.elapsed() >= Duration::from_secs(1) {
                     let _ = send_message(stream, Message::GetClientList, None);
+                    get_client_list_timer = Instant::now();
                 }
-                get_client_list_timer = Instant::now();
             }
 
             // Render at 60 FPS
             thread::sleep(Duration::from_millis(16));
         }
 
-        Ok(())
-    }
-}
-
-impl Drop for App {
-    fn drop(&mut self) {
-        let _ = restore_terminal();
+        restore_terminal()
     }
 }
 
 #[derive(Parser)]
 #[command(version = CHATTY_VERSION)]
-struct Args;
+struct Args {
+    /// The address for the client to connect to (e.g. localhost:8080)
+    #[arg(long, requires = "name", value_parser = NonEmptyStringValueParser::new())]
+    address: Option<String>,
+
+    /// Your display name that will be used once you connect 
+    #[arg(long, requires = "address", value_parser = NonEmptyStringValueParser::new())]
+    name: Option<String>
+}
 
 fn main() -> io::Result<()> {
-    let _ = Args::parse();
-    App::default().run()
+    let args = Args::parse();
+    let mut app = App::default();
+
+    if let (Some(address), Some(name)) = (args.address, args.name) {
+        println!("INFO: Trying to connect to `{address}` as `{name}`...");
+        app.connect_with(&address, &name).inspect_err(|err| eprintln!("ERROR: Failed to connect: {err}"))?;
+    }
+    
+    app.run()
 }

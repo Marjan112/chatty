@@ -107,6 +107,7 @@ struct Server {
 }
 
 impl Server {
+    // TODO: allow user to choose port
     const LISTENING_ADDRESS: &'static str = "0.0.0.0:6741";
 
     fn new() -> io::Result<Self> {
@@ -191,7 +192,7 @@ impl Server {
                 return;
             }
 
-            println!("INFO: ({}) '{}' says: {}", datetime_from_timestamp(timestamp_secs), client_name, msg);
+            println!("INFO: ({}) `{}` says: {}", datetime_from_timestamp(timestamp_secs), client_name, msg);
 
             let broadcast_msg = Message::ClientMessage {name: client_name, color: client.color, msg};
 
@@ -234,13 +235,13 @@ impl Server {
                     reason: reason.to_string()
                 };
 
-                println!("INFO: '{}' disconnected at {} reason: {}", client.name, datetime_from_timestamp(timestamp_secs), reason);
+                println!("INFO: `{}` disconnected at {} reason: {}", client.name, datetime_from_timestamp(timestamp_secs), reason);
 
                 self.server_broadcast(disconn_msg, timestamp_secs);
             }
 
             if let Err(err) = self.poll.registry().deregister(&mut client.stream) {
-                eprintln!("ERROR: Failed to deregister client '{}' from the poll object: {}", client.name, err);
+                eprintln!("ERROR: Failed to deregister client `{}` from the poll object: {}", client.name, err);
             }
         }
     }
@@ -255,7 +256,7 @@ impl Server {
             let _ = send_message(&mut client.stream, Message::ClientKicked {name: client_name, reason}, None);
 
             if let Err(err) = self.poll.registry().deregister(&mut client.stream) {
-                eprintln!("ERROR: Failed to deregister client '{}' from the poll object: {}", client.name, err);
+                eprintln!("ERROR: Failed to deregister client `{}` from the poll object: {}", client.name, err);
             }
         }
     }
@@ -271,7 +272,7 @@ impl Server {
         if let Some(client) = self.clients.get_mut(token) {
             client.name = client_name.clone();
 
-            println!("INFO: '{}' connected at {}", client.name, datetime_from_timestamp(timestamp_secs));
+            println!("INFO: `{}` connected at {}", client.name, datetime_from_timestamp(timestamp_secs));
 
             client.send_assigned_color();
             client_color = client.color;
@@ -322,7 +323,7 @@ impl Server {
         if let Some(client) = self.clients.get_mut(token) {
             old_name = client.name.clone();
             client.name = new_name.clone();
-            println!("INFO: '{}' changed their name to '{}'", old_name, client.name);
+            println!("INFO: `{}` changed their name to `{}`", old_name, client.name);
         }
 
         let timestamp_secs = Local::now().timestamp();

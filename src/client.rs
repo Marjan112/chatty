@@ -78,10 +78,10 @@ fn validate_address(address: &str) -> Result<SocketAddr, String> {
         return Err("address cannot be empty".into());
     }
 
-    match trimmed.to_socket_addrs() {
-        Ok(mut addrs) => addrs.next().ok_or_else(|| format!("could not resolve address `{trimmed}`")),
-        Err(err) => Err(format!("invalid address `{trimmed}`: {err}"))
-    }
+    trimmed.to_socket_addrs()
+        .map_err(|err| err.to_string())?
+        .find(|addr| matches!(addr, SocketAddr::V4(_)))
+        .ok_or_else(|| "no IPv4 address found".into())
 }
 
 struct Command {
@@ -384,10 +384,16 @@ impl App {
             KeyCode::Enter => {
                 if !self.shared.connection.load(Ordering::Relaxed) && self.shared.popup.lock().unwrap().is_none() {
                     match self.ui.connect_form.focused {
-                        ConnectFormField::Address => self.ui.connect_form.next_field(),
+                        ConnectFormField::Address => {
+                            if !self.ui.address_input_box.is_empty() {
+                                self.ui.connect_form.next_field();
+                            }
+                        }
                         ConnectFormField::Name => {
-                            if let Err(err) = self.connect_from_ui() {
-                                *self.shared.popup.lock().unwrap() = Some(ActivePopup::Error(format!("Failed to connect: {err}")));
+                            if !self.ui.address_input_box.is_empty() && !self.ui.name_input_box.is_empty() {
+                                if let Err(err) = self.connect_from_ui() {
+                                    *self.shared.popup.lock().unwrap() = Some(ActivePopup::Error(format!("Failed to connect: {err}")));
+                                }
                             }
                         }
                     }

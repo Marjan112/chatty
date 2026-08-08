@@ -104,32 +104,37 @@ struct Server {
     poll: Poll,
     clients: HashMap<Token, Client>,
     messages: Vec<(i64, Message)>,
+    port: u16
 }
 
 impl Server {
-    // TODO: allow user to choose port
-    const LISTENING_ADDRESS: &'static str = "0.0.0.0:6741";
+    fn new(port: Option<u16>) -> io::Result<Self> {
+        let socket_addr = format!("0.0.0.0:{}", port.unwrap_or(0))
+            .parse::<SocketAddr>()
+            .map_err(|err| {
+                eprintln!("ERROR: Failed to parse listening address: {err}");
+                io::Error::new(io::ErrorKind::InvalidInput, err.to_string())
+            })?;
 
-    fn new() -> io::Result<Self> {
-        let mut listener = TcpListener::bind(Self::LISTENING_ADDRESS.parse().unwrap()).map_err(|err| {
-            eprintln!("ERROR: Failed to bind {}: {}", Self::LISTENING_ADDRESS, err);
-            err
-        })?;
-        let poll = Poll::new().map_err(|err| {
-            eprintln!("ERROR: Failed to create poll object: {err}");
-            err
-        })?;
+        let mut listener = TcpListener::bind(socket_addr)
+            .inspect_err(|err| eprintln!("ERROR: Failed to bind: {err}"))?;
+        let poll = Poll::new()
+            .inspect_err(|err| eprintln!("ERROR: Failed to create poll object: {err}"))?;
 
-        poll.registry().register(&mut listener, Token(0), Interest::READABLE).map_err(|err| {
-            eprintln!("ERROR: Failed to register listener in poll object: {err}");
-            err
-        })?;
+        let port = listener.local_addr()
+            .inspect_err(|err| eprintln!("ERROR: Failed to get local socket addess of the listener: {err}"))?
+            .port();
+
+        poll.registry()
+            .register(&mut listener, Token(0), Interest::READABLE)
+            .inspect_err(|err| eprintln!("ERROR: Failed to register listener in poll object: {err}"))?;
 
         Ok(Self {
             listener,
             poll,
             clients: HashMap::new(),
             messages: Vec::new(),
+            port
         })
     }
 
@@ -137,7 +142,7 @@ impl Server {
         let mut events = Events::with_capacity(1024);
         let mut counter = 0;
 
-        println!("INFO: Listening to {}...", Self::LISTENING_ADDRESS);
+        println!("INFO: Listening on port {}...", self.port);
         loop {
             if let Err(err) = self.poll.poll(&mut events, None) {
                 eprintln!("ERROR: Failed to poll: {err}");
@@ -428,11 +433,15 @@ impl Server {
 
 #[derive(Parser)]
 #[command(version = CHATTY_VERSION)]
-struct Args;
+struct Args {
+    /// The port that the server will bind to
+    #[arg(long)]
+    port: Option<u16>
+}
 
 fn main() -> io::Result<()> {
-    let _ = Args::parse();
+    let args = Args::parse();
     println!("INFO: ChaTTY server {CHATTY_VERSION}");
-    let mut server = Server::new()?;
+    let mut server = Server::new(args.port)?;
     server.listen();
 }

@@ -19,7 +19,7 @@ use ratatui::{
         },
         event::{
             self,
-            Event, KeyCode, KeyEvent, MouseEvent, MouseEventKind,
+            Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
             EnableMouseCapture, DisableMouseCapture
         }
     },
@@ -331,6 +331,7 @@ impl App {
 
     fn handle_key_event(&mut self, key: KeyEvent) {
         match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.shared.exit.store(true, Ordering::Relaxed),
             KeyCode::Esc => {
                 let mut popup = self.shared.popup.lock().unwrap();
                 if popup.is_some() {

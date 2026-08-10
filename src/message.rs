@@ -5,7 +5,7 @@ use serde::{Serialize, Deserialize};
 
 use crate::ChatColor;
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum KickReason {
     NameTaken
 }
@@ -20,7 +20,7 @@ impl fmt::Display for KickReason {
 
 // Make clippy shut up
 #[allow(clippy::enum_variant_names)]
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Message {
     ClientConnected {
         name: String,

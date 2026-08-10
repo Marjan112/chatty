@@ -1,14 +1,15 @@
-use mio::{
-    net::{ TcpListener, TcpStream },
-    Events, Interest, Poll, Token
-};
 use std::{
-    io::{self, Write, Read},
+    io,
     net::SocketAddr,
-    hash::{Hash, Hasher},
-    collections::hash_map::{DefaultHasher, HashMap}
+    collections::HashMap,
+    sync::Arc
 };
-use chrono::Local;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::{RwLock, mpsc::{self, Sender, Receiver}}
+};
+use postcard;
 use clap::Parser;
 
 mod chat_color;
@@ -18,417 +19,127 @@ mod message;
 use message::*;
 
 mod env;
-use env::*;
-
-mod utils;
-use utils::*;
+use crate::env::CHATTY_VERSION;
 
 struct Client {
-    stream: TcpStream,
+    addr: SocketAddr,
     name: String,
-    buffer: Vec<u8>,
     color: ChatColor,
-    handshake_finished: bool,
+    tx: Sender<(i64, Message)>
 }
 
 impl Client {
-    const DEFAULT_COLORS: [ChatColor; 11] = [
-        ChatColor::Red,
-        ChatColor::Green,
-        ChatColor::Yellow,
-        ChatColor::Blue,
-        ChatColor::Magenta,
-        ChatColor::Cyan,
-        ChatColor::LightRed,
-        ChatColor::LightGreen,
-        ChatColor::LightYellow,
-        ChatColor::LightBlue,
-        ChatColor::LightMagenta
-    ];
-
-    fn send_assigned_color(&mut self) {
-        let mut hasher = DefaultHasher::new();
-        self.name.to_lowercase().hash(&mut hasher);
-        let hash = hasher.finish();
-        let color_index = (hash as usize) % Client::DEFAULT_COLORS.len();
-
-        self.color = Self::DEFAULT_COLORS[color_index];
-        let _ = send_message(&mut self.stream, Message::ClientAssignedColor { color: self.color }, None);
-    }
-
-    pub fn receive_message(&mut self) -> io::Result<Option<(i64, Message)>> {
-        loop {
-            if self.buffer.len() >= 12 {
-                let len = u32::from_le_bytes(self.buffer[8..12].try_into().unwrap()) as usize;
-                if self.buffer.len() >= 12 + len {
-                    break;
-                }
-            }
-
-            let mut temp = [0u8; 1024];
-            match self.stream.read(&mut temp) {
-                Ok(0) => return Err(io::Error::new(io::ErrorKind::ConnectionReset, "connection closed")),
-                Ok(n) => self.buffer.extend_from_slice(&temp[..n]),
-                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(None),
-                Err(err) => return Err(err)
-            }
-        }
-
-        if self.buffer.len() < 8 {
-            return Ok(None);
-        }
-        let timestamp = i64::from_le_bytes(self.buffer[0..8].try_into().unwrap());
-
-        if self.buffer.len() < 12 {
-            return Ok(None);
-        }
-        let len = u32::from_le_bytes(self.buffer[8..12].try_into().unwrap()) as usize;
-
-        if self.buffer.len() < 12 + len {
-            return Ok(None);
-        }
-
-        let msg_bytes = self.buffer[12..(12 + len)].to_vec();
-
-        self.buffer.drain(0..(12 + len));
-
-        let msg = postcard::from_bytes(&msg_bytes)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("failed to deserialize message: {err}")))?;
-
-        Ok(Some((timestamp, msg)))
-    }
-}
-
-struct Server {
-    listener: TcpListener,
-    poll: Poll,
-    clients: HashMap<Token, Client>,
-    messages: Vec<(i64, Message)>,
-    port: u16
-}
-
-impl Server {
-    fn new(port: Option<u16>) -> io::Result<Self> {
-        let socket_addr = format!("0.0.0.0:{}", port.unwrap_or(0))
-            .parse::<SocketAddr>()
-            .map_err(|err| {
-                eprintln!("ERROR: Failed to parse listening address: {err}");
-                io::Error::new(io::ErrorKind::InvalidInput, err.to_string())
-            })?;
-
-        let mut listener = TcpListener::bind(socket_addr)
-            .inspect_err(|err| eprintln!("ERROR: Failed to bind: {err}"))?;
-        let poll = Poll::new()
-            .inspect_err(|err| eprintln!("ERROR: Failed to create poll object: {err}"))?;
-
-        let port = listener.local_addr()
-            .inspect_err(|err| eprintln!("ERROR: Failed to get local socket addess of the listener: {err}"))?
-            .port();
-
-        poll.registry()
-            .register(&mut listener, Token(0), Interest::READABLE)
-            .inspect_err(|err| eprintln!("ERROR: Failed to register listener in poll object: {err}"))?;
-
-        Ok(Self {
-            listener,
-            poll,
-            clients: HashMap::new(),
-            messages: Vec::new(),
-            port
-        })
-    }
-
-    fn listen(&mut self) -> ! {
-        let mut events = Events::with_capacity(1024);
-        let mut counter = 0;
-
-        println!("INFO: Listening on port {}...", self.port);
-        loop {
-            if let Err(err) = self.poll.poll(&mut events, None) {
-                eprintln!("ERROR: Failed to poll: {err}");
-                continue;
-            }
-            for event in events.iter() {
-                let token = event.token();
-                match token {
-                    Token(0) => loop {
-                        match self.listener.accept() {
-                            Ok((mut stream, addr)) => {
-                                counter += 1;
-                                let client_token = Token(counter);
-
-                                match self.poll.registry().register(&mut stream, client_token, Interest::READABLE | Interest::WRITABLE) {
-                                    Ok(_) => self.client_incoming(stream, addr, client_token),
-                                    Err(err) => eprintln!("ERROR: Failed to register client in the poll object: {err}")
-                                }
-                            }
-                            Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
-                            Err(err) => {
-                                eprintln!("ERROR: Failed to accept client: {err}");
-                                break;
-                            }
-                        }
-                    },
-                    token => {
-                        if event.is_readable() {
-                            self.client_read(token);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn client_incoming(&mut self, stream: TcpStream, addr: SocketAddr, token: Token) {
-        println!("INFO: Incoming connection from {addr}");
-        self.clients.insert(token, Client {
-            stream,
+    fn new(addr: SocketAddr, tx: Sender<(i64, Message)>) -> Self {
+        Self {
+            addr,
             name: String::new(),
             color: ChatColor::Reset,
-            buffer: Vec::new(),
-            handshake_finished: false
-        });
-    }
-
-    fn client_broadcast(&mut self, sender_token: &Token, timestamp_secs: i64, msg: String) {
-        if let Some(client) = self.clients.get(sender_token) {
-            let client_name = client.name.clone();
-            if client_name.is_empty() {
-                return;
-            }
-
-            println!("INFO: ({}) `{}` says: {}", datetime_from_timestamp(timestamp_secs), client_name, msg);
-
-            let broadcast_msg = Message::ClientMessage {name: client_name, color: client.color, msg};
-
-            let recipients: Vec<Token> = self.clients
-                .keys()
-                .filter(|&&token| token != *sender_token)
-                .cloned()
-                .collect();
-
-            for other_token in recipients {
-                if let Some(other_client) = self.clients.get_mut(&other_token) {
-                    let _ = send_message(&mut other_client.stream, broadcast_msg.clone(), Some(timestamp_secs));
-                }
-            }
-
-            self.messages.push((timestamp_secs, broadcast_msg));
+            tx
         }
     }
+}
 
-    fn server_broadcast(&mut self, msg: Message, timestamp_secs: i64) {
-        for client in self.clients.values_mut() {
-            let _ = send_message(&mut client.stream, msg.clone(), Some(timestamp_secs));
-        }
-        self.messages.push((timestamp_secs, msg));
+type Clients = Arc<RwLock<HashMap<u64, Client>>>;
+
+async fn init_handshake(stream: &mut TcpStream) -> io::Result<()> {
+    const EXPECTED_MAGIC: &[u8] = b"ChaTTY\0\0";
+    let mut magic = [0u8; 8];
+
+    stream.read_exact(&mut magic).await?;
+    
+    if magic != EXPECTED_MAGIC {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid client"));
     }
 
-    fn client_disconnected(&mut self, token: &Token, reason: &str) {
-        if let Some(mut client) = self.clients.remove(token) {
-            if client.name.is_empty() {
-                match client.stream.peer_addr() {
-                    Ok(addr) => println!("INFO: {addr} disconnected prematurely (reason: {reason})"),
-                    Err(err) => eprintln!("ERROR: Failed to get address of the prematurely disconnected client: {err}")
-                }
-            } else {
-                let timestamp_secs = Local::now().timestamp();
+    stream.write_all(EXPECTED_MAGIC).await?;
 
-                let disconn_msg = Message::ClientDisconnected {
-                    name: client.name.clone(),
-                    color: client.color,
-                    reason: reason.to_string()
-                };
+    Ok(())
+}
 
-                println!("INFO: `{}` disconnected at {} reason: {}", client.name, datetime_from_timestamp(timestamp_secs), reason);
-
-                self.server_broadcast(disconn_msg, timestamp_secs);
-            }
-
-            if let Err(err) = self.poll.registry().deregister(&mut client.stream) {
-                eprintln!("ERROR: Failed to deregister client `{}` from the poll object: {}", client.name, err);
-            }
-        }
-    }
-
-    fn kick_client(&mut self, token: &Token, client_name: String, reason: KickReason) {
-        if let Some(mut client) = self.clients.remove(token) {
-            match client.stream.peer_addr() {
-                Ok(addr) => println!("INFO: {addr} was kicked (reason: {reason})"),
-                Err(err) => eprintln!("ERROR: Failed to get address of the kicked client: {err}")
-            }
-
-            let _ = send_message(&mut client.stream, Message::ClientKicked {name: client_name, reason}, None);
-
-            if let Err(err) = self.poll.registry().deregister(&mut client.stream) {
-                eprintln!("ERROR: Failed to deregister client `{}` from the poll object: {}", client.name, err);
-            }
-        }
-    }
-
-    fn client_connected(&mut self, token: &Token, timestamp_secs: i64, client_name: String) {
-        if self.clients.iter().any(|(_, c)| { c.name == client_name }) {
-            self.kick_client(token, client_name, KickReason::NameTaken);
-            return;
-        }
-
-        let mut client_color = ChatColor::Reset;
-
-        if let Some(client) = self.clients.get_mut(token) {
-            client.name = client_name.clone();
-
-            println!("INFO: `{}` connected at {}", client.name, datetime_from_timestamp(timestamp_secs));
-
-            client.send_assigned_color();
-            client_color = client.color;
-
-            for (timestamp, msg) in &self.messages {
-                let _ = send_message(&mut client.stream, msg.clone(), Some(*timestamp));
-            }
-        }
-
-        self.server_broadcast(Message::ClientConnected { name: client_name, color: client_color }, timestamp_secs);
-    }
-
-    fn client_send_message(&mut self, token: &Token, message: Message, timestamp_secs: Option<i64>) -> io::Result<()> {
-        if let Some(client) = self.clients.get_mut(token) {
-            send_message(&mut client.stream, message, timestamp_secs)
+async fn disconnect<S: std::fmt::Display + AsRef<str>>(client_id: u64, clients: Clients, reason: S) {
+    if let Some(client) = clients.read().await.get(&client_id) {
+        if client.name.is_empty() {
+            println!("INFO: disconnected unauthenticated client {} | {}", client.addr, reason);
         } else {
-            Err(io::Error::other("client doesnt exist in the hash map"))
+            println!("INFO: `{}` disconnected | {}", client.name, reason);
         }
     }
+}
 
-    fn client_send_list(&mut self, token: &Token) {
-        let clients: Vec<(String, ChatColor)> =
-            self.clients
-                .values()
-                .filter(|other_client| !other_client.name.is_empty())
-                .map(|other_client| (other_client.name.clone(), other_client.color))
-                .collect();
-
-        let _ = self.client_send_message(token, Message::ClientList { clients }, None);
+async fn receive_message(stream: &mut TcpStream) -> io::Result<(i64, Message)> {
+    let timestamp = stream.read_i64_le().await?;
+    let message_len = stream.read_u32_le().await? as usize;
+    
+    if message_len > 1024 * 1024 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "message is too long"));
     }
 
-    fn client_read(&mut self, token: Token) {
-        if self.client_handshake(&token) {
-            self.client_read_messages(&token);
+    let mut message_bytes = vec![0u8; message_len];
+    stream.read_exact(&mut message_bytes).await?;
+
+    let message = postcard::from_bytes(&message_bytes)
+        .map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("failed to deserialize message: {err}")
+            )
+        })?;
+
+    return Ok((timestamp, message));
+}
+
+fn connected(client_id: u64, clients: Clients, timestamp: i64, name: String) {
+    // TODO: kick client that doesnt have unique name 
+    // TODO: send the assigned color 
+    // TODO: send all of the previous messages
+    // TODO: broadcast to all clients
+}
+
+async fn client_broadcast(client_id: u64, clients: Clients, timestamp_secs: i64, msg: String) {
+    // TODO: broadcast to all clients except the sender
+    let txs = {
+        let clients = clients.read().await;
+        clients
+            .iter()
+            .filter(|(id, _)| **id != client_id)
+            .map(|(_, client)| client.tx.clone())
+            .collect::<Vec<_>>()
+    };
+
+    let message = {
+        let clients = clients.read().await; 
+        let client = clients.get(&client_id).unwrap();    
+
+        Message::ClientMessage {
+            name: client.name.clone(),
+            color: client.color,
+            msg
         }
-    }
+    };
 
-    fn client_change_name(&mut self, token: &Token, new_name: String) {
-        if let Some(client) = self.clients.get(token) {
-            if self.clients.iter().any(|(_, other_client)| other_client.name == new_name) {
-                let _ = self.client_send_message(token, Message::NameTaken {old_name: client.name.clone()}, None);
-                return;
+    for tx in txs {
+        let _ = tx.send((timestamp_secs, message.clone())).await;
+    }
+}
+
+fn server_broadcast(clients: Clients, timestamp_secs: i64, msg: String) {
+    // TODO: broadcast to everyone
+}
+
+async fn handle_client(client_id: u64, mut stream: TcpStream, clients: Clients, mut rx: Receiver<(i64, Message)>) -> io::Result<()> {
+    init_handshake(&mut stream).await?;
+    
+    loop {
+        tokio::select! {
+            result = receive_message(&mut stream) => {}
+            Some((timestamp, message)) = rx.recv() => {
+                // send_message(&mut stream, message, Some(timestamp));
             }
-        }
-
-        let mut old_name = String::new();
-
-        if let Some(client) = self.clients.get_mut(token) {
-            old_name = client.name.clone();
-            client.name = new_name.clone();
-            println!("INFO: `{}` changed their name to `{}`", old_name, client.name);
-        }
-
-        let timestamp_secs = Local::now().timestamp();
-
-        self.server_broadcast(Message::ClientChangedName { old_name, new_name }, timestamp_secs);
-    }
-
-    fn client_change_color(&mut self, token: &Token, new_color: ChatColor) {
-        if let Some(client) = self.clients.get_mut(token) {
-            client.color = new_color;
+            else => break
         }
     }
 
-    fn client_read_messages(&mut self, token: &Token) {
-        let mut read_ops: u32 = 0;
-        const READS_PER_TICK: u32 = 32;
-
-        loop {
-            read_ops += 1;
-            if read_ops > READS_PER_TICK {
-                break;
-            }
-            if let Some(client) = self.clients.get_mut(token) {
-                match client.receive_message() {
-                    Ok(timestamp_message) => {
-                        if let Some((timestamp_secs, message)) = timestamp_message {
-                            match message {
-                                Message::ClientConnected { name, .. } => self.client_connected(token, timestamp_secs, name),
-                                Message::ClientMessage { msg, .. } => self.client_broadcast(token, timestamp_secs, msg),
-                                Message::GetClientList => self.client_send_list(token),
-                                Message::ClientWantNewName { new_name } => self.client_change_name(token, new_name),
-                                Message::ClientWantNewColor { new_color } => self.client_change_color(token, new_color),
-                                _ => {}
-                            };
-                        }
-                    }
-                    Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(err) => {
-                        let error_message = err.to_string();
-                        let mut reason = error_message.as_str();
-                        match err.kind() {
-                            io::ErrorKind::ConnectionReset => reason = "connection closed",
-                            io::ErrorKind::InvalidData => reason = "invalid client",
-                            _ => {}
-                        };
-                        self.client_disconnected(token, reason);
-                        break;
-                    }
-                };
-            }
-        }
-    }
-
-    fn client_handshake(&mut self, token: &Token) -> bool {
-        let client = match self.clients.get_mut(token) {
-            Some(c) => c,
-            None => return false,
-        };
-
-        if client.handshake_finished {
-            return true;
-        }
-
-        const EXPECTED_MAGIC: &[u8] = b"ChaTTY\0\0";
-
-        loop {
-            if client.buffer.len() >= 8 {
-                break;
-            }
-
-            let mut temp = [0u8; 8];
-            match client.stream.read(&mut temp) {
-                Ok(0) => {
-                    self.client_disconnected(token, "connection closed");
-                    return false;
-                }
-                Ok(n) => client.buffer.extend_from_slice(&temp[..n]),
-                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return false,
-                Err(err) => {
-                    self.client_disconnected(token, &err.to_string());
-                    return false;
-                }
-            }
-        }
-
-        if client.buffer[..8] != *EXPECTED_MAGIC {
-            self.client_disconnected(token, "invalid client");
-            return false;
-        }
-
-        client.buffer.drain(..8);
-
-        if let Err(err) = client.stream.write_all(EXPECTED_MAGIC) {
-            self.client_disconnected(token, &err.to_string());
-            return false;
-        }
-
-        client.handshake_finished = true;
-        true
-    }
+    Ok(())
 }
 
 #[derive(Parser)]
@@ -439,9 +150,35 @@ struct Args {
     port: Option<u16>
 }
 
-fn main() -> io::Result<()> {
+#[tokio::main]
+async fn main() -> io::Result<()> {
     let args = Args::parse();
+
     println!("INFO: ChaTTY server {CHATTY_VERSION}");
-    let mut server = Server::new(args.port)?;
-    server.listen();
+
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", args.port.unwrap_or(0))).await?; 
+    println!("INFO: listening on port {}...", listener.local_addr()?.port());
+
+    let clients = Arc::new(RwLock::new(HashMap::<u64, Client>::new()));
+    let mut client_id = 0;
+
+    loop {
+        match listener.accept().await {
+            Ok((stream, addr)) => {
+                println!("INFO: accepted new client {addr}");
+
+                let (tx, rx) = mpsc::channel::<(i64, Message)>(64);
+
+                client_id += 1;
+                clients.write().await.insert(client_id, Client::new(addr, tx));
+
+                let clients_clone = clients.clone();
+
+                tokio::spawn(async move {
+                    handle_client(client_id, stream, clients_clone, rx).await
+                });
+            }
+            Err(err) => eprintln!("ERROR: failed to accept new client: {err}")
+        }
+    }
 }

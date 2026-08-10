@@ -5,7 +5,7 @@ use std::{
     sync::Arc
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWriteExt, AsyncWrite},
     net::{TcpListener, TcpStream},
     sync::{RwLock, mpsc::{self, Sender, Receiver}}
 };
@@ -16,7 +16,7 @@ mod chat_color;
 use chat_color::*;
 
 mod message;
-use message::*;
+use message::Message;
 
 mod env;
 use crate::env::CHATTY_VERSION;
@@ -39,31 +39,18 @@ impl Client {
     }
 }
 
-type Clients = Arc<RwLock<HashMap<u64, Client>>>;
+async fn send_message<W: AsyncWrite + Unpin>(stream: &mut W, message: &Message, timestamp_secs: Option<i64>) -> io::Result<()>{
+    let timestamp_to_send = timestamp_secs.unwrap_or(chrono::Local::now().timestamp());
 
-async fn init_handshake(stream: &mut TcpStream) -> io::Result<()> {
-    const EXPECTED_MAGIC: &[u8] = b"ChaTTY\0\0";
-    let mut magic = [0u8; 8];
+    let encoded = postcard::to_allocvec(&message)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let encoded_len = encoded.len() as u32;
 
-    stream.read_exact(&mut magic).await?;
-    
-    if magic != EXPECTED_MAGIC {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid client"));
-    }
-
-    stream.write_all(EXPECTED_MAGIC).await?;
+    stream.write_i64_le(timestamp_to_send).await?;
+    stream.write_u32_le(encoded_len).await?;
+    stream.write_all(&encoded).await?;
 
     Ok(())
-}
-
-async fn disconnect<S: std::fmt::Display + AsRef<str>>(client_id: u64, clients: Clients, reason: S) {
-    if let Some(client) = clients.read().await.get(&client_id) {
-        if client.name.is_empty() {
-            println!("INFO: disconnected unauthenticated client {} | {}", client.addr, reason);
-        } else {
-            println!("INFO: `{}` disconnected | {}", client.name, reason);
-        }
-    }
 }
 
 async fn receive_message(stream: &mut TcpStream) -> io::Result<(i64, Message)> {
@@ -88,52 +75,107 @@ async fn receive_message(stream: &mut TcpStream) -> io::Result<(i64, Message)> {
     return Ok((timestamp, message));
 }
 
-fn connected(client_id: u64, clients: Clients, timestamp: i64, name: String) {
-    // TODO: kick client that doesnt have unique name 
-    // TODO: send the assigned color 
-    // TODO: send all of the previous messages
-    // TODO: broadcast to all clients
+async fn init_handshake(stream: &mut TcpStream) -> io::Result<()> {
+    const EXPECTED_MAGIC: &[u8] = b"ChaTTY\0\0";
+    let mut magic = [0u8; 8];
+
+    stream.read_exact(&mut magic).await?;
+    
+    if magic != EXPECTED_MAGIC {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid client"));
+    }
+
+    stream.write_all(EXPECTED_MAGIC).await?;
+
+    Ok(())
 }
 
-async fn client_broadcast(client_id: u64, clients: Clients, timestamp_secs: i64, msg: String) {
-    // TODO: broadcast to all clients except the sender
-    let txs = {
-        let clients = clients.read().await;
-        clients
-            .iter()
-            .filter(|(id, _)| **id != client_id)
-            .map(|(_, client)| client.tx.clone())
-            .collect::<Vec<_>>()
-    };
+struct Server {
+    clients: RwLock<HashMap<u64, Client>>
+}
 
-    let message = {
-        let clients = clients.read().await; 
-        let client = clients.get(&client_id).unwrap();    
-
-        Message::ClientMessage {
-            name: client.name.clone(),
-            color: client.color,
-            msg
+impl Server {
+    fn new() -> Self {
+        Self {
+            clients: RwLock::new(HashMap::new())
         }
-    };
+    }
 
-    for tx in txs {
-        let _ = tx.send((timestamp_secs, message.clone())).await;
+    async fn client_disconnect<S: std::fmt::Display + AsRef<str>>(&self, client_id: u64, reason: S) {
+        if let Some(client) = self.clients.read().await.get(&client_id) {
+            if client.name.is_empty() {
+                println!("INFO: disconnected unauthenticated client {} | {}", client.addr, reason);
+            } else {
+                println!("INFO: `{}` disconnected | {}", client.name, reason);
+            }
+        }
+    }
+
+    async fn client_connected(&self, client_id: u64, timestamp: i64, name: String) {
+        // TODO: kick client that doesnt have unique name 
+        // TODO: send the assigned color 
+        // TODO: send all of the previous messages
+        // TODO: broadcast to all clients
+    }
+
+    async fn client_broadcast(&self, client_id: u64, timestamp_secs: i64, msg: String) {
+        let (txs, message) = {
+            let clients = self.clients.read().await; 
+
+            let client = match clients.get(&client_id) {
+                Some(client) => client,
+                None => return
+            };
+
+            let txs = clients
+                .iter()
+                .filter(|(id, _)| **id != client_id)
+                .map(|(_, client)| client.tx.clone())
+                .collect::<Vec<_>>();
+
+            let message = Message::ClientMessage {
+                name: client.name.clone(),
+                color: client.color,
+                msg
+            };
+
+            (txs, message)
+        };
+
+        for tx in txs {
+            let _ = tx.send((timestamp_secs, message.clone())).await;
+        }
+    }
+
+    async fn send_client_list(&self, client_id: u64) {}
+
+    async fn client_change_name(&self, client_id: u64, new_name: String) {}
+
+    async fn client_change_color(&self, client_id: u64, new_color: ChatColor) {}
+
+    async fn broadcast(&self, timestamp_secs: i64, msg: String) {
+        // TODO: broadcast to everyone
     }
 }
 
-fn server_broadcast(clients: Clients, timestamp_secs: i64, msg: String) {
-    // TODO: broadcast to everyone
-}
-
-async fn handle_client(client_id: u64, mut stream: TcpStream, clients: Clients, mut rx: Receiver<(i64, Message)>) -> io::Result<()> {
+async fn handle_client(server: Arc<Server>, client_id: u64, mut stream: TcpStream, mut rx: Receiver<(i64, Message)>) -> io::Result<()> {
     init_handshake(&mut stream).await?;
     
     loop {
         tokio::select! {
-            result = receive_message(&mut stream) => {}
+            result = receive_message(&mut stream) => {
+                let (timestamp, message) = result?;
+                match message {
+                    Message::ClientConnected { name, .. } => server.client_connected(client_id, timestamp, name).await,
+                    Message::ClientMessage { msg, .. } => server.client_broadcast(client_id, timestamp, msg).await,
+                    Message::GetClientList => server.send_client_list(client_id).await,
+                    Message::ClientWantNewName { new_name } => server.client_change_name(client_id, new_name).await,
+                    Message::ClientWantNewColor { new_color } => server.client_change_color(client_id, new_color).await,
+                    _ => {}
+                };
+            }
             Some((timestamp, message)) = rx.recv() => {
-                // send_message(&mut stream, message, Some(timestamp));
+                send_message(&mut stream, &message, Some(timestamp)).await?;
             }
             else => break
         }
@@ -159,7 +201,7 @@ async fn main() -> io::Result<()> {
     let listener = TcpListener::bind(format!("0.0.0.0:{}", args.port.unwrap_or(0))).await?; 
     println!("INFO: listening on port {}...", listener.local_addr()?.port());
 
-    let clients = Arc::new(RwLock::new(HashMap::<u64, Client>::new()));
+    let server = Arc::new(Server::new());
     let mut client_id = 0;
 
     loop {
@@ -170,12 +212,12 @@ async fn main() -> io::Result<()> {
                 let (tx, rx) = mpsc::channel::<(i64, Message)>(64);
 
                 client_id += 1;
-                clients.write().await.insert(client_id, Client::new(addr, tx));
+                server.clients.write().await.insert(client_id, Client::new(addr, tx));
 
-                let clients_clone = clients.clone();
+                let server = server.clone();
 
                 tokio::spawn(async move {
-                    handle_client(client_id, stream, clients_clone, rx).await
+                    handle_client(server, client_id, stream, rx).await
                 });
             }
             Err(err) => eprintln!("ERROR: failed to accept new client: {err}")

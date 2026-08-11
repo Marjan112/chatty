@@ -237,7 +237,6 @@ version = "0.11.0"
 dependencies = [
  "chrono",
  "clap",
- "mio",
  "postcard",
  "ratatui",
  "ratatui-textarea",

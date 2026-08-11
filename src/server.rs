@@ -2,21 +2,26 @@ use std::{
     io,
     net::SocketAddr,
     collections::HashMap,
+    hash::{Hash, Hasher, DefaultHasher},
     sync::Arc
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, AsyncWrite},
     net::{TcpListener, TcpStream},
-    sync::{RwLock, mpsc::{self, Sender, Receiver}}
+    sync::{RwLock, Mutex, mpsc::{self, Sender, Receiver}}
 };
 use postcard;
+use chrono::Local;
 use clap::Parser;
 
 mod chat_color;
 use chat_color::*;
 
 mod message;
-use message::Message;
+use message::{Message, KickReason};
+
+mod utils;
+use utils::datetime_from_timestamp;
 
 mod env;
 use crate::env::CHATTY_VERSION;
@@ -25,16 +30,16 @@ struct Client {
     addr: SocketAddr,
     name: String,
     color: ChatColor,
-    tx: Sender<(i64, Message)>
+    outgoing_tx: Sender<(Option<i64>, Message)>
 }
 
 impl Client {
-    fn new(addr: SocketAddr, tx: Sender<(i64, Message)>) -> Self {
+    fn new(addr: SocketAddr, outgoing_tx: Sender<(Option<i64>, Message)>) -> Self {
         Self {
             addr,
             name: String::new(),
             color: ChatColor::Reset,
-            tx
+            outgoing_tx
         }
     }
 }
@@ -91,35 +96,143 @@ async fn init_handshake(stream: &mut TcpStream) -> io::Result<()> {
 }
 
 struct Server {
-    clients: RwLock<HashMap<u64, Client>>
+    clients: RwLock<HashMap<u64, Client>>,
+    messages: Mutex<Vec<(i64, Message)>>
 }
 
 impl Server {
     fn new() -> Self {
         Self {
-            clients: RwLock::new(HashMap::new())
+            clients: RwLock::new(HashMap::new()),
+            messages: Mutex::new(Vec::new())
         }
+    }
+
+    async fn get_messages(&self) -> Vec<(i64, Message)> {
+        self.messages.lock().await.clone()
+    }
+
+    async fn add_message(&self, timestamp: i64, message: Message) {
+        self.messages.lock().await.push((timestamp, message));
     }
 
     async fn client_disconnect<S: std::fmt::Display + AsRef<str>>(&self, client_id: u64, reason: S) {
-        if let Some(client) = self.clients.read().await.get(&client_id) {
-            if client.name.is_empty() {
-                println!("INFO: disconnected unauthenticated client {} | {}", client.addr, reason);
-            } else {
-                println!("INFO: `{}` disconnected | {}", client.name, reason);
+        let client = {
+            let mut clients = self.clients.write().await;
+            match clients.remove(&client_id) {
+                Some(client) => client,
+                None => return
             }
+        };
+
+        if client.name.is_empty() {
+            println!("INFO: disconnected unauthenticated client {} | {}", client.addr, reason);
+            return;
         }
+
+        let timestamp = Local::now().timestamp();
+
+        println!("INFO: `{}` disconnected at {} | {}", client.name, datetime_from_timestamp(timestamp), reason);
+
+        let message = Message::ClientDisconnected {
+            name: client.name,
+            color: client.color,
+            reason: reason.to_string()
+        };
+
+        self.broadcast(Some(timestamp), message).await;
     }
 
-    async fn client_connected(&self, client_id: u64, timestamp: i64, name: String) {
-        // TODO: kick client that doesnt have unique name 
-        // TODO: send the assigned color 
-        // TODO: send all of the previous messages
-        // TODO: broadcast to all clients
+    async fn client_send_assigned_color(&self, client_id: u64) -> Option<ChatColor> {
+        static DEFAULT_COLORS: &[ChatColor] = &[
+            ChatColor::Red,
+            ChatColor::Green,
+            ChatColor::Yellow,
+            ChatColor::Blue,
+            ChatColor::Magenta,
+            ChatColor::Cyan,
+            ChatColor::LightRed,
+            ChatColor::LightGreen,
+            ChatColor::LightYellow,
+            ChatColor::LightBlue,
+            ChatColor::LightMagenta
+        ];
+
+        let (tx, color) = {
+            let mut clients = self.clients.write().await;
+            let client = match clients.get_mut(&client_id) {
+                Some(client) => client,
+                None => return None
+            };
+
+            let mut hasher = DefaultHasher::new();
+            client.name.hash(&mut hasher);
+            let hash = hasher.finish();
+            let color_index = hash as usize % DEFAULT_COLORS.len();
+
+            client.color = DEFAULT_COLORS[color_index];
+
+            (client.outgoing_tx.clone(), client.color)
+        };
+
+        let message = Message::ClientAssignedColor { color };
+
+        let _ = tx.send((None, message)).await;
+
+        Some(color)
+    }
+
+    async fn client_connected(&self, client_id: u64, timestamp: i64, client_name: String) {
+        let kick_tx = {
+            let mut clients = self.clients.write().await;
+            if clients.iter().any(|(_, c)| c.name == client_name) {
+                let client = match clients.remove(&client_id) {
+                    Some(client) => client,
+                    None => return
+                };
+                Some(client.outgoing_tx)
+            } else {
+                if let Some(client) = clients.get_mut(&client_id) {
+                    client.name = client_name.clone();
+                }
+                None
+            }
+        };
+
+        if let Some(tx) = kick_tx {
+            let message = Message::ClientKicked {
+                name: client_name.clone(),
+                reason: KickReason::NameTaken
+            };
+
+            let _ = tx.send((None, message)).await;
+
+            return;
+        }
+
+        println!("INFO: `{}` connected at {}", client_name, datetime_from_timestamp(timestamp));
+        
+        let color = self.client_send_assigned_color(client_id).await.unwrap_or(ChatColor::Reset);
+
+        {
+            let clients = self.clients.read().await;
+            let messages = self.get_messages().await;
+            if let Some(client) = clients.get(&client_id) {
+                for (timestamp, message) in messages {
+                    let _ = client.outgoing_tx.send((Some(timestamp), message)).await; 
+                }
+            }
+        }
+
+        let message = Message::ClientConnected {
+            name: client_name,
+            color 
+        };
+        self.broadcast(Some(timestamp), message).await;
     }
 
     async fn client_broadcast(&self, client_id: u64, timestamp_secs: i64, msg: String) {
-        let (txs, message) = {
+        let (txs, message, client_name) = {
             let clients = self.clients.read().await; 
 
             let client = match clients.get(&client_id) {
@@ -130,52 +243,124 @@ impl Server {
             let txs = clients
                 .iter()
                 .filter(|(id, _)| **id != client_id)
-                .map(|(_, client)| client.tx.clone())
+                .map(|(_, client)| client.outgoing_tx.clone())
                 .collect::<Vec<_>>();
 
             let message = Message::ClientMessage {
                 name: client.name.clone(),
                 color: client.color,
-                msg
+                msg: msg.clone()
             };
 
-            (txs, message)
+            (txs, message, client.name.clone())
         };
 
+        println!("INFO: ({}) `{}` says: {}", datetime_from_timestamp(timestamp_secs), client_name, msg);
+
         for tx in txs {
-            let _ = tx.send((timestamp_secs, message.clone())).await;
+            let _ = tx.send((Some(timestamp_secs), message.clone())).await;
+        }
+
+        self.add_message(timestamp_secs, message).await;
+    }
+
+    async fn send_client_list(&self, client_id: u64) {
+        let (tx, clients) = {
+            let clients = self.clients.read().await;
+            let client = match clients.get(&client_id) {
+                Some(client) => client,
+                None => return
+            };
+            let clients = clients
+                .values()
+                .filter(|c| !c.name.is_empty())
+                .map(|c| (c.name.clone(), c.color))
+                .collect();
+            (client.outgoing_tx.clone(), clients)
+        };
+
+        let _ = tx.send((None, Message::ClientList { clients })).await;
+    }
+
+    async fn client_change_name(&self, client_id: u64, new_name: String) {
+        let (tx, message) = {
+            let mut clients = self.clients.write().await;
+            let client = match clients.get_mut(&client_id) {
+                Some(client) => client,
+                None => return
+            };
+            
+            let old_name = client.name.clone();
+
+            let message = Message::ClientChangedName {
+                old_name,
+                new_name: new_name.clone()
+            };
+
+            client.name = new_name;
+            (client.outgoing_tx.clone(), message)
+        };
+
+        let _ = tx.send((None, message)).await;
+    }
+
+    async fn client_change_color(&self, client_id: u64, new_color: ChatColor) {
+        let mut clients = self.clients.write().await;
+        if let Some(client) = clients.get_mut(&client_id) {
+            client.color = new_color;
         }
     }
 
-    async fn send_client_list(&self, client_id: u64) {}
+    async fn broadcast(&self, timestamp: Option<i64>, msg: Message) {
+        let txs: Vec<_> = {
+            let clients = self.clients.read().await;
+            clients
+                .values()
+                .map(|c| c.outgoing_tx.clone())
+                .collect()
+        };
 
-    async fn client_change_name(&self, client_id: u64, new_name: String) {}
+        self.add_message(timestamp.unwrap_or(Local::now().timestamp()), msg.clone()).await;
 
-    async fn client_change_color(&self, client_id: u64, new_color: ChatColor) {}
-
-    async fn broadcast(&self, timestamp_secs: i64, msg: String) {
-        // TODO: broadcast to everyone
+        for tx in txs {
+            let _ = tx.send((timestamp, msg.clone())).await;
+        }
     }
 }
 
-async fn handle_client(server: Arc<Server>, client_id: u64, mut stream: TcpStream, mut rx: Receiver<(i64, Message)>) -> io::Result<()> {
+async fn handle_client(server: Arc<Server>, client_id: u64, mut stream: TcpStream, mut rx: Receiver<(Option<i64>, Message)>) -> io::Result<()> {
     init_handshake(&mut stream).await?;
     
     loop {
         tokio::select! {
             result = receive_message(&mut stream) => {
-                let (timestamp, message) = result?;
-                match message {
-                    Message::ClientConnected { name, .. } => server.client_connected(client_id, timestamp, name).await,
-                    Message::ClientMessage { msg, .. } => server.client_broadcast(client_id, timestamp, msg).await,
-                    Message::GetClientList => server.send_client_list(client_id).await,
-                    Message::ClientWantNewName { new_name } => server.client_change_name(client_id, new_name).await,
-                    Message::ClientWantNewColor { new_color } => server.client_change_color(client_id, new_color).await,
-                    _ => {}
-                };
+                match result {
+                    Ok((timestamp, message)) => {
+                        match message {
+                            Message::ClientConnected { name, .. } => server.client_connected(client_id, timestamp, name).await,
+                            Message::ClientMessage { msg, .. } => server.client_broadcast(client_id, timestamp, msg).await,
+                            Message::GetClientList => server.send_client_list(client_id).await,
+                            Message::ClientWantNewName { new_name } => server.client_change_name(client_id, new_name).await,
+                            Message::ClientWantNewColor { new_color } => server.client_change_color(client_id, new_color).await,
+                            _ => {}
+                        };
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
+                        server.client_disconnect(client_id, "connection closed").await;
+                        break;
+                    }
+                    Err(err) => {
+                        server.client_disconnect(client_id, err.to_string()).await;
+                        break;
+                    }
+                }
             }
-            Some((timestamp, message)) = rx.recv() => {
-                send_message(&mut stream, &message, Some(timestamp)).await?;
+            Some((timestamp, message)) = rx.recv() => { 
+                send_message(&mut stream, &message, timestamp).await?;
+                if let Message::ClientKicked { reason, .. } = message {
+                    server.client_disconnect(client_id, format!("kicked: {reason}")).await;
+                    break;
+                }
             }
             else => break
         }
@@ -209,15 +394,15 @@ async fn main() -> io::Result<()> {
             Ok((stream, addr)) => {
                 println!("INFO: accepted new client {addr}");
 
-                let (tx, rx) = mpsc::channel::<(i64, Message)>(64);
+                let (outgoing_tx, outgoing_rx) = mpsc::channel::<(Option<i64>, Message)>(64);
 
                 client_id += 1;
-                server.clients.write().await.insert(client_id, Client::new(addr, tx));
+                server.clients.write().await.insert(client_id, Client::new(addr, outgoing_tx));
 
                 let server = server.clone();
 
                 tokio::spawn(async move {
-                    handle_client(server, client_id, stream, rx).await
+                    handle_client(server, client_id, stream, outgoing_rx).await
                 });
             }
             Err(err) => eprintln!("ERROR: failed to accept new client: {err}")

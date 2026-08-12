@@ -81,7 +81,7 @@ pub fn spawn_receiver(mut stream: TcpStream, shared: Arc<Shared>)  {
         while shared.connection.load(Ordering::Relaxed) {
             match receive_message(&mut stream) {
                 Ok((timestamp_secs, message)) => handle_incoming_message(timestamp_secs, message, &shared),
-                Err(ref err) if err.kind() == io::ErrorKind::TimedOut => continue,
+                Err(ref err) if err.kind() == io::ErrorKind::TimedOut || err.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(err) => {
                     match err.kind() {
                         io::ErrorKind::ConnectionReset | io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe => {

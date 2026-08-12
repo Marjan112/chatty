@@ -6,7 +6,7 @@ use std::{
     sync::Arc
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, AsyncWrite},
+    io::{AsyncReadExt, AsyncWriteExt, AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
     sync::{RwLock, Mutex, mpsc::{self, Sender, Receiver}}
 };
@@ -58,16 +58,18 @@ async fn send_message<W: AsyncWrite + Unpin>(stream: &mut W, message: &Message, 
     Ok(())
 }
 
-async fn receive_message(stream: &mut TcpStream) -> io::Result<(i64, Message)> {
-    let timestamp = stream.read_i64_le().await?;
-    let message_len = stream.read_u32_le().await? as usize;
+async fn receive_message<R: AsyncRead + Unpin>(_client_id: u64, reader: &mut R) -> io::Result<(i64, Message)> {
+    let timestamp = reader.read_i64_le().await?;
+    let message_len = reader.read_u32_le().await? as usize;
     
+    // println!("DEBUG: client {client_id}: received timestamp={timestamp}, message_len={message_len}");
+
     if message_len > 1024 * 1024 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "message is too long"));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("message is too long: {message_len}")));
     }
 
     let mut message_bytes = vec![0u8; message_len];
-    stream.read_exact(&mut message_bytes).await?;
+    reader.read_exact(&mut message_bytes).await?;
 
     let message = postcard::from_bytes(&message_bytes)
         .map_err(|err| {
@@ -101,6 +103,8 @@ struct Server {
 }
 
 impl Server {
+    const MAX_MESSAGES: usize = 1000;
+
     fn new() -> Self {
         Self {
             clients: RwLock::new(HashMap::new()),
@@ -113,7 +117,14 @@ impl Server {
     }
 
     async fn add_message(&self, timestamp: i64, message: Message) {
-        self.messages.lock().await.push((timestamp, message));
+        let mut messages = self.messages.lock().await;
+        messages.push((timestamp, message));
+
+        let messages_len = messages.len();
+
+        if messages_len > Self::MAX_MESSAGES {
+            messages.drain(..messages_len - Self::MAX_MESSAGES);
+        }
     }
 
     async fn client_disconnect<S: std::fmt::Display + AsRef<str>>(&self, client_id: u64, reason: S) {
@@ -186,11 +197,11 @@ impl Server {
         let kick_tx = {
             let mut clients = self.clients.write().await;
             if clients.iter().any(|(_, c)| c.name == client_name) {
-                let client = match clients.remove(&client_id) {
+                let client = match clients.get(&client_id) {
                     Some(client) => client,
                     None => return
                 };
-                Some(client.outgoing_tx)
+                Some(client.outgoing_tx.clone())
             } else {
                 if let Some(client) = clients.get_mut(&client_id) {
                     client.name = client_name.clone();
@@ -214,13 +225,20 @@ impl Server {
         
         let color = self.client_send_assigned_color(client_id).await.unwrap_or(ChatColor::Reset);
 
-        {
+        let tx = {
             let clients = self.clients.read().await;
-            let messages = self.get_messages().await;
-            if let Some(client) = clients.get(&client_id) {
-                for (timestamp, message) in messages {
-                    let _ = client.outgoing_tx.send((Some(timestamp), message)).await; 
-                }
+        
+            match clients.get(&client_id) {
+                Some(client) => client.outgoing_tx.clone(),
+                None => return
+            }
+        };
+
+        let messages = self.get_messages().await;
+
+        for (timestamp, message) in messages {
+            if tx.send((Some(timestamp), message)).await.is_err() {
+                return;
             }
         }
 
@@ -312,6 +330,8 @@ impl Server {
     }
 
     async fn broadcast(&self, timestamp: Option<i64>, msg: Message) {
+        let timestamp = timestamp.unwrap_or(Local::now().timestamp());
+
         let txs: Vec<_> = {
             let clients = self.clients.read().await;
             clients
@@ -320,51 +340,67 @@ impl Server {
                 .collect()
         };
 
-        self.add_message(timestamp.unwrap_or(Local::now().timestamp()), msg.clone()).await;
+        self.add_message(timestamp, msg.clone()).await;
 
         for tx in txs {
-            let _ = tx.send((timestamp, msg.clone())).await;
+            let _ = tx.send((Some(timestamp), msg.clone())).await;
         }
     }
 }
 
 async fn handle_client(server: Arc<Server>, client_id: u64, mut stream: TcpStream, mut rx: Receiver<(Option<i64>, Message)>) -> io::Result<()> {
-    init_handshake(&mut stream).await?;
-    
-    loop {
-        tokio::select! {
-            result = receive_message(&mut stream) => {
-                match result {
-                    Ok((timestamp, message)) => {
-                        match message {
-                            Message::ClientConnected { name, .. } => server.client_connected(client_id, timestamp, name).await,
-                            Message::ClientMessage { msg, .. } => server.client_broadcast(client_id, timestamp, msg).await,
-                            Message::GetClientList => server.send_client_list(client_id).await,
-                            Message::ClientWantNewName { new_name } => server.client_change_name(client_id, new_name).await,
-                            Message::ClientWantNewColor { new_color } => server.client_change_color(client_id, new_color).await,
-                            _ => {}
-                        };
-                    }
-                    Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
-                        server.client_disconnect(client_id, "connection closed").await;
-                        break;
-                    }
-                    Err(err) => {
-                        server.client_disconnect(client_id, err.to_string()).await;
-                        break;
-                    }
+    if let Err(err) = init_handshake(&mut stream).await {
+        server.client_disconnect(client_id, err.to_string()).await;
+        return Ok(());
+    }
+
+    let (mut reader, mut writer) = stream.into_split();
+
+    let server_reader = server.clone();
+    let reader_task = tokio::spawn(async move {
+        loop {
+            match receive_message(client_id, &mut reader).await {
+                Ok((timestamp, message)) => {
+                    match message {
+                        Message::ClientConnected { name, .. } => server_reader.client_connected(client_id, timestamp, name).await,
+                        Message::ClientMessage { msg, .. } => server_reader.client_broadcast(client_id, timestamp, msg).await,
+                        Message::GetClientList => server_reader.send_client_list(client_id).await,
+                        Message::ClientWantNewName { new_name } => server_reader.client_change_name(client_id, new_name).await,
+                        Message::ClientWantNewColor { new_color } => server_reader.client_change_color(client_id, new_color).await,
+                        _ => {}
+                    };
                 }
-            }
-            Some((timestamp, message)) = rx.recv() => { 
-                send_message(&mut stream, &message, timestamp).await?;
-                if let Message::ClientKicked { reason, .. } = message {
-                    server.client_disconnect(client_id, format!("kicked: {reason}")).await;
+                Err(err) if matches!(err.kind(), io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe) => {
+                    server_reader.client_disconnect(client_id, "connection closed").await;
                     break;
                 }
-            }
-            else => break
+                Err(err) => {
+                    server_reader.client_disconnect(client_id, err.to_string()).await;
+                    break;
+                }
+            }    
         }
-    }
+    });
+    
+    let server_writer = server.clone();
+    let writer_task = tokio::spawn(async move {
+        while let Some((timestamp, message)) = rx.recv().await {
+            if let Err(err) = send_message(&mut writer, &message, timestamp).await {
+                let reason = match err.kind() {
+                    io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe => String::from("connection closed"),
+                    _ => err.to_string()
+                };
+                server_writer.client_disconnect(client_id, reason).await;
+                break;
+            }
+            if let Message::ClientKicked { reason, .. } = message {
+                server_writer.client_disconnect(client_id, format!("kicked: {reason}")).await;
+                break;
+            }
+        }
+    });
+
+    let _ = tokio::join!(reader_task, writer_task); 
 
     Ok(())
 }

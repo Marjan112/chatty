@@ -18,26 +18,25 @@ use crate::{
 };
 
 fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Shared) {
-    let mut messages = shared.messages.lock().unwrap();
     let datetime = datetime_from_timestamp(timestamp_secs).to_string();
 
     match message {
         Message::ClientConnected {name, color} =>
-            messages.push(Line::from(vec![
+            shared.add_message(Line::from(vec![
                 datetime.into(),
                 Span::from(" "),
                 Span::styled(name, Style::default().fg(color.into())),
                 Span::from(" connected"),
             ])),
         Message::ClientDisconnected {name, color, reason} =>
-            messages.push(Line::from(vec![
+            shared.add_message(Line::from(vec![
                 datetime.into(),
                 Span::from(" "),
                 Span::styled(name, Style::default().fg(color.into())),
                 format!(" disconnected (reason: {reason})").into()
             ])),
         Message::ClientMessage {name, color, msg} =>
-            messages.push(Line::from(vec![
+            shared.add_message(Line::from(vec![
                 datetime.into(),
                 Span::from(" "),
                 Span::styled(name, Style::default().fg(color.into())),
@@ -49,10 +48,10 @@ fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Share
                 *shared.popup.lock().unwrap() = Some(ActivePopup::Info(format!("You have been kicked (reason: {reason})")));
             }
         }
-        Message::ClientChangedName {old_name, new_name} => messages.push(format!("{datetime} {old_name} changed their name to {new_name}").into()),
+        Message::ClientChangedName {old_name, new_name} => shared.add_message(format!("{datetime} {old_name} changed their name to {new_name}").into()),
         Message::ClientAssignedColor { color } => *shared.color.lock().unwrap() = color,
         Message::NameTaken { old_name } => {
-            messages.push("name: new name that you requested is already taken by someone else".into());
+            shared.add_message("name: new name that you requested is already taken by someone else".into());
             *shared.name.lock().unwrap() = old_name;
         }
         _ => {}

@@ -21,7 +21,7 @@ mod message;
 use message::{Message, KickReason};
 
 mod utils;
-use utils::datetime_from_timestamp;
+use utils::{datetime_from_timestamp, MAX_MESSAGES};
 
 mod env;
 use crate::env::CHATTY_VERSION;
@@ -58,12 +58,10 @@ async fn send_message<W: AsyncWrite + Unpin>(stream: &mut W, message: &Message, 
     Ok(())
 }
 
-async fn receive_message<R: AsyncRead + Unpin>(_client_id: u64, reader: &mut R) -> io::Result<(i64, Message)> {
+async fn receive_message<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<(i64, Message)> {
     let timestamp = reader.read_i64_le().await?;
     let message_len = reader.read_u32_le().await? as usize;
     
-    // println!("DEBUG: client {client_id}: received timestamp={timestamp}, message_len={message_len}");
-
     if message_len > 1024 * 1024 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, format!("message is too long: {message_len}")));
     }
@@ -103,8 +101,6 @@ struct Server {
 }
 
 impl Server {
-    const MAX_MESSAGES: usize = 1000;
-
     fn new() -> Self {
         Self {
             clients: RwLock::new(HashMap::new()),
@@ -122,8 +118,8 @@ impl Server {
 
         let messages_len = messages.len();
 
-        if messages_len > Self::MAX_MESSAGES {
-            messages.drain(..messages_len - Self::MAX_MESSAGES);
+        if messages_len > MAX_MESSAGES {
+            messages.drain(..messages_len - MAX_MESSAGES);
         }
     }
 
@@ -301,25 +297,31 @@ impl Server {
     }
 
     async fn client_change_name(&self, client_id: u64, new_name: String) {
-        let (tx, message) = {
+        let message = {
             let mut clients = self.clients.write().await;
-            let client = match clients.get_mut(&client_id) {
-                Some(client) => client,
-                None => return
-            };
-            
-            let old_name = client.name.clone();
+            if clients.iter().any(|(_, other_client)| other_client.name == new_name) {
+                let client = match clients.get(&client_id) {
+                    Some(client) => client,
+                    None => return
+                };
+                Message::NameTaken { old_name: client.name.clone() }
+            } else {
+                let client = match clients.get_mut(&client_id) {
+                    Some(client) => client,
+                    None => return
+                };
+                let old_name = client.name.clone();
 
-            let message = Message::ClientChangedName {
-                old_name,
-                new_name: new_name.clone()
-            };
-
-            client.name = new_name;
-            (client.outgoing_tx.clone(), message)
+                client.name = new_name.clone();
+                
+                Message::ClientChangedName {
+                    old_name,
+                    new_name: new_name
+                }
+            }
         };
 
-        let _ = tx.send((None, message)).await;
+        self.broadcast(None, message).await;
     }
 
     async fn client_change_color(&self, client_id: u64, new_color: ChatColor) {
@@ -359,7 +361,7 @@ async fn handle_client(server: Arc<Server>, client_id: u64, mut stream: TcpStrea
     let server_reader = server.clone();
     let reader_task = tokio::spawn(async move {
         loop {
-            match receive_message(client_id, &mut reader).await {
+            match receive_message(&mut reader).await {
                 Ok((timestamp, message)) => {
                     match message {
                         Message::ClientConnected { name, .. } => server_reader.client_connected(client_id, timestamp, name).await,

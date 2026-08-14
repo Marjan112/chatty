@@ -97,12 +97,10 @@ const COMMANDS: &[Command] = &[
         description: "Helps, duh",
         signature: "/help",
         run: |app, _| {
-            let mut messages = app.shared.messages.lock().unwrap();
-
-            messages.push(Line::from("Help:"));
+            app.shared.add_message(Line::from("Help:"));
 
             for Command {description, signature, ..} in COMMANDS {
-                messages.push(format!("• {signature} - {description}").into());
+                app.shared.add_message(format!("• {signature} - {description}").into());
             }
         }
     },
@@ -117,18 +115,17 @@ const COMMANDS: &[Command] = &[
         description: "Change your display name",
         signature: "/name <new name>",
         run: |app, new_name| {
-            let mut messages = app.shared.messages.lock().unwrap();
             let mut current_name = app.shared.name.lock().unwrap();
 
             if new_name.is_empty() {
-                messages.push("usage: /name <new name>".into());
+                app.shared.add_message("usage: /name <new name>".into());
                 return;
             }
 
             match validate_name(&new_name) {
                 Ok(new_name_validated) => {
                     if new_name_validated == *current_name {
-                        messages.push(format!("name: your display name is already `{new_name}`").into());
+                        app.shared.add_message(format!("name: your display name is already `{new_name}`").into());
                         return;
                     }
 
@@ -138,12 +135,12 @@ const COMMANDS: &[Command] = &[
 
                     if let Some(stream) = &mut app.stream {
                         if let Err(err) = send_message(stream, Message::ClientWantNewName { new_name: new_name_validated }, None) {
-                            messages.push(format!("name: failed to change your display name: {err}").into());
+                            app.shared.add_message(format!("name: failed to change your display name: {err}").into());
                             *current_name = old_name;
                         }
                     }
                 }
-                Err(err) => messages.push(format!("name: failed to change your display name: {err}").into())
+                Err(err) => app.shared.add_message(format!("name: failed to change your display name: {err}").into())
             }
         }
     },
@@ -152,11 +149,10 @@ const COMMANDS: &[Command] = &[
         description: "Change your color",
         signature: "/color <new color>",
         run: |app, new_color| {
-            let mut messages = app.shared.messages.lock().unwrap();
             let mut current_color = app.shared.color.lock().unwrap();
 
             if new_color.is_empty() {
-                messages.push("usage: /color <new color>".into());
+                app.shared.add_message("usage: /color <new color>".into());
                 return;
             }
 
@@ -165,7 +161,7 @@ const COMMANDS: &[Command] = &[
                     let new_chat_color: ChatColor = new_color_parsed.into();
 
                     if new_chat_color == *current_color {
-                        messages.push("color: you already have the color that you requested".into());
+                        app.shared.add_message("color: you already have the color that you requested".into());
                         return;
                     }
 
@@ -175,18 +171,18 @@ const COMMANDS: &[Command] = &[
 
                     if let Some(stream) = &mut app.stream {
                         if let Err(err) = send_message(stream, Message::ClientWantNewColor { new_color: new_chat_color }, None) {
-                            messages.push(format!("color: failed to change your color: {err}").into());
+                            app.shared.add_message(format!("color: failed to change your color: {err}").into());
                             *current_color = old_color;
                         }
                     }
 
                     let current_color: Color = current_color.to_owned().into();
-                    messages.push(Line::from(vec![
+                    app.shared.add_message(Line::from(vec![
                         Span::from("color: changed your color to "),
                         Span::styled(current_color.to_string(), Style::default().fg(current_color))
                     ]));
                 }
-                Err(_) => messages.push(format!("color: `{new_color}` not supported, maybe try hex code for that color?").into())
+                Err(_) => app.shared.add_message(format!("color: `{new_color}` not supported, maybe try hex code for that color?").into())
             }
         }
     },
@@ -416,8 +412,7 @@ impl App {
                         if let Some(command) = COMMANDS.iter().find(|c| c.name == cmd_name) {
                             (command.run)(self, args);
                         } else {
-                            let mut messages = self.shared.messages.lock().unwrap();
-                            messages.push(format!("CMD: Unknown command: {cmd_name}").into());
+                            self.shared.add_message(format!("CMD: Unknown command: {cmd_name}").into());
                         }
 
                         self.ui.chat_prompt.textarea.clear();
@@ -433,7 +428,6 @@ impl App {
 
                     let timestamp_secs = chrono::Local::now().timestamp();
 
-                    let mut messages = self.shared.messages.lock().unwrap();
 
                     match send_message(self.stream.as_mut().unwrap(), message, Some(timestamp_secs)) {
                         Ok(_) => {
@@ -447,14 +441,17 @@ impl App {
                                 .unwrap()
                                 .to_owned()
                                 .into();
-                            messages.push(Line::from(vec![
+                            self.shared.add_message(Line::from(vec![
                                 datetime.into(),
                                 " ".into(),
                                 Span::styled(name, Style::default().fg(color)),
                                 format!(": {input}").into()
                             ]));
                         }
-                        Err(err) => chat_error!(messages, "Failed to send message: {err}"),
+                        Err(err) => {
+                            let mut messages = self.shared.messages.lock().unwrap();
+                            chat_error!(messages, "Failed to send message: {err}");
+                        }
                     }
 
                     self.ui.chat_prompt.textarea.clear();

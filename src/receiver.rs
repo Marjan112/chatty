@@ -1,13 +1,12 @@
 use std::{
-    io::{self, Read},
-    net::{TcpStream, Shutdown},
-    thread,
+    io,
     sync::{atomic::Ordering, Arc}
 };
 use ratatui::{
     text::{Span, Line},
     style::{Style, Color}
 };
+use tokio::io::AsyncRead;
 
 use crate::{
     message::*,
@@ -58,60 +57,41 @@ fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Share
     }
 }
 
-fn receive_message(stream: &mut TcpStream) -> io::Result<(i64, Message)> {
-    let mut timestamp_buf = [0u8; 8];
-    stream.read_exact(&mut timestamp_buf)?;
-    let timestamp = i64::from_le_bytes(timestamp_buf);
+fn handle_receive_error(err: io::Error, shared: &Shared) {
+    match err.kind() {
+        io::ErrorKind::ConnectionReset | io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe => {
+            shared.connection.store(false, Ordering::Relaxed);
 
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf)?;
-    let len = u32::from_le_bytes(len_buf);
+            shared.messages.lock().unwrap().clear();
+            shared.clients.lock().unwrap().clear();
 
-    let mut buf = vec![0u8; len as usize];
-    stream.read_exact(&mut buf)?;
+            let mut popup = shared.popup.lock().unwrap();
+            if popup.is_none() {
+                *popup = Some(ActivePopup::Info(String::from("Disconnected from the server")));
+            }
+        }
+        io::ErrorKind::InvalidData => {
+            let mut messages = shared.messages.lock().unwrap();
+            chat_error!(messages, "Received invalid data. A new message kind was probably implemented and your client can't deserialize it. You should try updating your client.");
+            chat_error!(messages, "{err}");
+        }
+        _ => {
+            shared.connection.store(false, Ordering::Relaxed);
 
-    let decoded = postcard::from_bytes(&buf).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+            shared.messages.lock().unwrap().clear();
+            shared.clients.lock().unwrap().clear();
 
-    Ok((timestamp, decoded))
+            *shared.popup.lock().unwrap() = Some(ActivePopup::Error(err.to_string()));
+        }
+    }
 }
 
-pub fn spawn_receiver(mut stream: TcpStream, shared: Arc<Shared>)  {
-    thread::spawn(move || {
+pub fn spawn_receiver<R: AsyncRead + Unpin + Send + 'static>(mut reader: R, shared: Arc<Shared>)  {
+    tokio::spawn(async move {
         while shared.connection.load(Ordering::Relaxed) {
-            match receive_message(&mut stream) {
+            match receive_message(&mut reader).await {
                 Ok((timestamp_secs, message)) => handle_incoming_message(timestamp_secs, message, &shared),
-                Err(ref err) if err.kind() == io::ErrorKind::TimedOut || err.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(err) => {
-                    match err.kind() {
-                        io::ErrorKind::ConnectionReset | io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe => {
-                            shared.connection.store(false, Ordering::Relaxed);
-
-                            shared.messages.lock().unwrap().clear();
-                            shared.clients.lock().unwrap().clear();
-
-                            let _ = stream.shutdown(Shutdown::Both);
-
-                            let mut popup = shared.popup.lock().unwrap();
-                            if popup.is_none() {
-                                *popup = Some(ActivePopup::Info(String::from("Disconnected from the server")));
-                            }
-                        }
-                        io::ErrorKind::InvalidData => {
-                            let mut messages = shared.messages.lock().unwrap();
-                            chat_error!(messages, "Received invalid data. A new message kind was probably implemented and your client can't deserialize it. You should try updating your client.");
-                        }
-                        _ => {
-                            shared.connection.store(false, Ordering::Relaxed);
-
-                            shared.messages.lock().unwrap().clear();
-                            shared.clients.lock().unwrap().clear();
-
-                            let _ = stream.shutdown(Shutdown::Both);
-
-                            *shared.popup.lock().unwrap() = Some(ActivePopup::Error(err.to_string()));
-                        }
-                    }
-                }
+                Err(err) => handle_receive_error(err, &shared)
             }
         }
     });

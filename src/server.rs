@@ -6,11 +6,10 @@ use std::{
     sync::Arc
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, AsyncRead, AsyncWrite},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::{RwLock, Mutex, mpsc::{self, Sender, Receiver}}
 };
-use postcard;
 use chrono::Local;
 use clap::Parser;
 
@@ -18,7 +17,7 @@ mod chat_color;
 use chat_color::*;
 
 mod message;
-use message::{Message, KickReason};
+use message::{Message, KickReason, send_message, receive_message};
 
 mod utils;
 use utils::{datetime_from_timestamp, MAX_MESSAGES};
@@ -42,42 +41,6 @@ impl Client {
             outgoing_tx
         }
     }
-}
-
-async fn send_message<W: AsyncWrite + Unpin>(stream: &mut W, message: &Message, timestamp_secs: Option<i64>) -> io::Result<()>{
-    let timestamp_to_send = timestamp_secs.unwrap_or(chrono::Local::now().timestamp());
-
-    let encoded = postcard::to_allocvec(&message)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    let encoded_len = encoded.len() as u32;
-
-    stream.write_i64_le(timestamp_to_send).await?;
-    stream.write_u32_le(encoded_len).await?;
-    stream.write_all(&encoded).await?;
-
-    Ok(())
-}
-
-async fn receive_message<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<(i64, Message)> {
-    let timestamp = reader.read_i64_le().await?;
-    let message_len = reader.read_u32_le().await? as usize;
-    
-    if message_len > 1024 * 1024 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("message is too long: {message_len}")));
-    }
-
-    let mut message_bytes = vec![0u8; message_len];
-    reader.read_exact(&mut message_bytes).await?;
-
-    let message = postcard::from_bytes(&message_bytes)
-        .map_err(|err| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("failed to deserialize message: {err}")
-            )
-        })?;
-
-    return Ok((timestamp, message));
 }
 
 async fn init_handshake(stream: &mut TcpStream) -> io::Result<()> {

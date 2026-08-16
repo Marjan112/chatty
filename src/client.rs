@@ -1,10 +1,13 @@
+#![allow(clippy::collapsible_if)]
+
 use std::{
-    boxed::Box,
-    io::{self, Write, Read},
-    net::{TcpStream, Shutdown, SocketAddr, ToSocketAddrs},
-    sync::{Arc, atomic::Ordering, mpsc::{self, Sender, Receiver}},
+    io,
+    net::{SocketAddr, ToSocketAddrs},
+    sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
-    thread
+    thread,
+    future::Future,
+    pin::Pin
 };
 use ratatui::{
     Terminal,
@@ -28,6 +31,10 @@ use ratatui::{
     DefaultTerminal,
 };
 use clap::{Parser, builder::NonEmptyStringValueParser};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpStream, tcp::OwnedWriteHalf}
+};
 
 mod chat_color;
 use chat_color::*;
@@ -88,7 +95,8 @@ struct Command {
     name: &'static str,
     description: &'static str,
     signature: &'static str,
-    run: fn(&mut App, &str)
+    // TODO: make `run` a variant that can be either `Sync` or `Async`                                                                                              
+    run: for<'a> fn(&'a mut App, &'a str) -> Pin<Box<dyn Future<Output = ()> + 'a>>
 }
 
 const COMMANDS: &[Command] = &[
@@ -96,61 +104,54 @@ const COMMANDS: &[Command] = &[
         name: "help",
         description: "Helps, duh",
         signature: "/help",
-        run: |app, _| {
+        run: |app, _| Box::pin(async move {
             app.shared.add_message(Line::from("Help:"));
 
             for Command {description, signature, ..} in COMMANDS {
                 app.shared.add_message(format!("• {signature} - {description}").into());
             }
-        }
+        })
     },
     Command {
         name: "clear",
         description: "Clears the chat",
         signature: "/clear",
-        run: |app, _| app.shared.messages.lock().unwrap().clear()
+        run: |app, _| Box::pin(async move {app.shared.messages.lock().unwrap().clear()})
     },
     Command {
         name: "name",
         description: "Change your display name",
         signature: "/name <new name>",
-        run: |app, new_name| {
-            let mut current_name = app.shared.name.lock().unwrap();
-
+        run: |app, new_name| Box::pin(async move {
             if new_name.is_empty() {
                 app.shared.add_message("usage: /name <new name>".into());
                 return;
             }
 
-            match validate_name(&new_name) {
+            match validate_name(new_name) {
                 Ok(new_name_validated) => {
-                    if new_name_validated == *current_name {
+                    if new_name_validated == *app.shared.name.lock().unwrap() {
                         app.shared.add_message(format!("name: your display name is already `{new_name}`").into());
                         return;
                     }
 
-                    let old_name = current_name.clone();
-
-                    *current_name = new_name_validated.clone();
-
-                    if let Some(stream) = &mut app.stream {
-                        if let Err(err) = send_message(stream, Message::ClientWantNewName { new_name: new_name_validated }, None) {
+                    if let Some(writer) = &mut app.writer {
+                        if let Err(err) = send_message(writer, &Message::ClientWantNewName { new_name: new_name_validated.clone() }, None).await {
                             app.shared.add_message(format!("name: failed to change your display name: {err}").into());
-                            *current_name = old_name;
+                        } else {
+                            *app.shared.name.lock().unwrap() = new_name_validated;
                         }
                     }
                 }
                 Err(err) => app.shared.add_message(format!("name: failed to change your display name: {err}").into())
             }
-        }
+        })
     },
     Command {
         name: "color",
         description: "Change your color",
         signature: "/color <new color>",
-        run: |app, new_color| {
-            let mut current_color = app.shared.color.lock().unwrap();
-
+        run: |app, new_color| Box::pin(async move {
             if new_color.is_empty() {
                 app.shared.add_message("usage: /color <new color>".into());
                 return;
@@ -160,66 +161,61 @@ const COMMANDS: &[Command] = &[
                 Ok(new_color_parsed) => {
                     let new_chat_color: ChatColor = new_color_parsed.into();
 
-                    if new_chat_color == *current_color {
+                    if new_chat_color == *app.shared.color.lock().unwrap() {
                         app.shared.add_message("color: you already have the color that you requested".into());
                         return;
                     }
 
-                    let old_color = *current_color;
-
-                    *current_color = new_chat_color;
-
-                    if let Some(stream) = &mut app.stream {
-                        if let Err(err) = send_message(stream, Message::ClientWantNewColor { new_color: new_chat_color }, None) {
-                            app.shared.add_message(format!("color: failed to change your color: {err}").into());
-                            *current_color = old_color;
+                    if let Some(writer) = &mut app.writer {
+                        match send_message(writer, &Message::ClientWantNewColor { new_color: new_chat_color }, None).await {
+                            Ok(_) => {
+                                let mut current_color = app.shared.color.lock().unwrap(); 
+                                *current_color = new_chat_color;
+                                app.shared.add_message(Line::from(vec![
+                                    Span::from("color: changed your color to "),
+                                    Span::styled(current_color.to_string(), Style::default().fg((*current_color).into()))
+                                ]));
+                            }
+                            Err(err) => app.shared.add_message(format!("color: failed to change your color: {err}").into())
                         }
                     }
-
-                    let current_color: Color = current_color.to_owned().into();
-                    app.shared.add_message(Line::from(vec![
-                        Span::from("color: changed your color to "),
-                        Span::styled(current_color.to_string(), Style::default().fg(current_color))
-                    ]));
                 }
                 Err(_) => app.shared.add_message(format!("color: `{new_color}` not supported, maybe try hex code for that color?").into())
             }
-        }
+        })
     },
     Command {
         name: "exit",
         description: "Exits the app",
         signature: "/exit",
-        run: exit_app
+        run: |app, _unused| Box::pin(async move {exit_app(app, _unused)})
     },
     Command {
         name: "quit",
         description: "Does the same as /exit",
         signature: "/quit",
-        run: exit_app
+        run: |app, _unused| Box::pin(async move {exit_app(app, _unused)})
     },
     Command {
         name: "disconnect",
         description: "Disconnect but does not exit",
         signature: "/disconnect",
-        run: |app, _| {
+        run: |app, _| Box::pin(async move {
             app.shared.connection.store(false, Ordering::Relaxed);
 
             app.shared.messages.lock().unwrap().clear();
             app.shared.clients.lock().unwrap().clear();
 
-            if let Some(stream) = app.stream.take() {
-                let _ = stream.shutdown(Shutdown::Both);
-            }
-        }
+            app.writer.take();
+        })
     }
 ];
 
-fn init_handshake(stream: &mut TcpStream) -> io::Result<()> {
-    stream.write_all(b"ChaTTY\0\0")?;
+async fn init_handshake(stream: &mut TcpStream) -> io::Result<()> {
+    stream.write_all(b"ChaTTY\0\0").await?;
 
     let mut server_magic_buf = [0u8; 8];
-    stream.read_exact(&mut server_magic_buf)?;
+    stream.read_exact(&mut server_magic_buf).await?;
 
     if server_magic_buf != *b"ChaTTY\0\0" {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "Not a ChaTTY server"));
@@ -266,13 +262,11 @@ fn restore_terminal() -> io::Result<()> {
     Ok(())
 }
 
-fn spawn_event_signaler(tx: Sender<Event>) {
+fn spawn_event_signaler(tx: std::sync::mpsc::Sender<Event>) {
     thread::spawn(move || {
         loop {
-            if let Ok(event) = event::read() {
-                if tx.send(event).is_err() {
-                    break;
-                }
+            if let Ok(event) = event::read() && tx.send(event).is_err() {
+                break;
             }
         }
     });
@@ -282,50 +276,50 @@ fn spawn_event_signaler(tx: Sender<Event>) {
 struct App {
     ui: Ui,
     shared: Arc<Shared>,
-    stream: Option<TcpStream>
+    writer: Option<OwnedWriteHalf>
 }
 
 impl App {
-    fn connect(&mut self, address: SocketAddr, name: String) -> io::Result<()> {
-        let timeout = Duration::from_secs(5);
+    async fn connect(&mut self, address: SocketAddr, name: String) -> io::Result<()> {
+        let mut stream = TcpStream::connect(address).await?;
+        init_handshake(&mut stream).await?;
 
-        let mut stream = TcpStream::connect_timeout(&address, timeout)?;
-        stream.set_read_timeout(Some(timeout))?;
-        stream.set_write_timeout(Some(timeout))?;
+        let (reader, mut writer) = stream.into_split();
 
-        init_handshake(&mut stream)?;
         send_message(
-            &mut stream,
-            Message::ClientConnected {
+            &mut writer,
+            &Message::ClientConnected {
                 name: name.clone(),
                 color: ChatColor::Reset
             },
             None
-        )?;
+        ).await?;
 
-        spawn_receiver(stream.try_clone()?, self.shared.clone());
-
-        self.stream = Some(stream);
+        self.writer = Some(writer);
         self.shared.connection.store(true, Ordering::Relaxed);
         *self.shared.name.lock().unwrap() = name;
         *self.shared.messages.lock().unwrap() = greet_message();
 
+        spawn_receiver(reader, self.shared.clone());
+
         Ok(())
     }
 
-    fn connect_with(&mut self, address: &str, name: &str) -> io::Result<()> {
+    async fn connect_with(&mut self, address: &str, name: &str) -> io::Result<()> {
         let address = validate_address(address).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
         let name = validate_name(name).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
-        self.connect(address, name)
+        self.connect(address, name).await
     }
 
-    fn connect_from_ui(&mut self) -> Result<(), String> {
+    async fn connect_from_ui(&mut self) -> Result<(), String> {
         let address = validate_address(&self.ui.address_input_box.lines()[0])?;
         let name = validate_name(&self.ui.name_input_box.lines()[0])?;
-        self.connect(address, name).map_err(|err| err.to_string())
+        self.connect(address, name)
+            .await
+            .map_err(|err| err.to_string())
     }
 
-    fn handle_key_event(&mut self, key: KeyEvent) {
+    async fn handle_key_event(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.shared.exit.store(true, Ordering::Relaxed),
             KeyCode::Esc => {
@@ -388,7 +382,7 @@ impl App {
                         }
                         ConnectFormField::Name => {
                             if !self.ui.address_input_box.is_empty() && !self.ui.name_input_box.is_empty() {
-                                if let Err(err) = self.connect_from_ui() {
+                                if let Err(err) = self.connect_from_ui().await {
                                     *self.shared.popup.lock().unwrap() = Some(ActivePopup::Error(format!("Failed to connect: {err}")));
                                 }
                             }
@@ -410,7 +404,7 @@ impl App {
                         let args = cmd.strip_prefix(cmd_name).unwrap_or("").trim();
 
                         if let Some(command) = COMMANDS.iter().find(|c| c.name == cmd_name) {
-                            (command.run)(self, args);
+                            (command.run)(self, args).await;
                         } else {
                             self.shared.add_message(format!("CMD: Unknown command: {cmd_name}").into());
                         }
@@ -428,8 +422,7 @@ impl App {
 
                     let timestamp_secs = chrono::Local::now().timestamp();
 
-
-                    match send_message(self.stream.as_mut().unwrap(), message, Some(timestamp_secs)) {
+                    match send_message(self.writer.as_mut().unwrap(), &message, Some(timestamp_secs)).await {
                         Ok(_) => {
                             let datetime = datetime_from_timestamp(timestamp_secs).to_string();
                             let name = self.shared.name
@@ -496,25 +489,25 @@ impl App {
         }
     }
 
-    fn handle_events(&mut self, rx: &Receiver<Event>) {
+    async fn handle_events(&mut self, rx: &std::sync::mpsc::Receiver<Event>) {
         while let Ok(event) = rx.try_recv() {
             match event {
-                Event::Key(key) if key.is_press() => self.handle_key_event(key),
+                Event::Key(key) if key.is_press() => self.handle_key_event(key).await,
                 Event::Mouse(mouse) => self.handle_mouse_event(mouse),
                 _ => {}
             }
         }
     }
 
-    fn run(&mut self) -> io::Result<()> {
+    async fn run(&mut self) -> io::Result<()> {
         let mut terminal = init_terminal()?;
         let mut get_client_list_timer = Instant::now();
-        let (tx, rx) = mpsc::channel();
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
 
-        spawn_event_signaler(tx);
+        spawn_event_signaler(event_tx);
 
         while !self.shared.exit.load(Ordering::Relaxed) {
-            self.handle_events(&rx);
+            self.handle_events(&event_rx).await;
 
             terminal.draw(|frame| {
                 if self.shared.connection.load(Ordering::Relaxed) {
@@ -528,15 +521,15 @@ impl App {
                 }
             })?;
 
-            if let Some(stream) = &mut self.stream {
+            if let Some(writer) = &mut self.writer {
                 if get_client_list_timer.elapsed() >= Duration::from_secs(1) {
-                    let _ = send_message(stream, Message::GetClientList, None);
+                    let _ = send_message(writer, &Message::GetClientList, None).await;
                     get_client_list_timer = Instant::now();
                 }
             }
 
             // Render at 60 FPS
-            thread::sleep(Duration::from_millis(16));
+            tokio::time::sleep(Duration::from_millis(16)).await;
         }
 
         restore_terminal()
@@ -555,14 +548,17 @@ struct Args {
     name: Option<String>
 }
 
-fn main() -> io::Result<()> {
+#[tokio::main]
+async fn main() -> io::Result<()> {
     let args = Args::parse();
     let mut app = App::default();
 
     if let (Some(address), Some(name)) = (args.address, args.name) {
         println!("INFO: Trying to connect to `{address}` as `{name}`...");
-        app.connect_with(&address, &name).inspect_err(|err| eprintln!("ERROR: Failed to connect: {err}"))?;
+        app.connect_with(&address, &name)
+            .await
+            .inspect_err(|err| eprintln!("ERROR: Failed to connect: {err}"))?;
     }
     
-    app.run()
+    app.run().await
 }

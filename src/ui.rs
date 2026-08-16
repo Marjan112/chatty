@@ -294,7 +294,7 @@ impl Prompt {
 
     pub fn history_next(&mut self) {
         match self.history_index {
-            None => return,
+            None => (),
             Some(index) if index < self.history.len() - 1 => {
                 self.history_index = Some(index + 1);
                 self.load_history();

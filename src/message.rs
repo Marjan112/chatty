@@ -82,7 +82,7 @@ pub async fn receive_message<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result
             )
         })?;
 
-    return Ok((timestamp, message));
+    Ok((timestamp, message))
 }
 
 pub async fn send_message<W: AsyncWrite + Unpin>(writer: &mut W, message: &Message, timestamp_secs: Option<i64>) -> io::Result<()> {

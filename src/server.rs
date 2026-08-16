@@ -279,7 +279,7 @@ impl Server {
                 
                 Message::ClientChangedName {
                     old_name,
-                    new_name: new_name
+                    new_name
                 }
             }
         };

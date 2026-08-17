@@ -91,12 +91,18 @@ fn validate_address(address: &str) -> Result<SocketAddr, String> {
         .ok_or_else(|| "no IPv4 address found".into())
 }
 
+type CommandFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
+
+enum CommandRun {
+    Sync(fn(&mut App, &str)),
+    Async(for<'a> fn(&'a mut App, &'a str) -> CommandFuture<'a>)
+}
+
 struct Command {
     name: &'static str,
     description: &'static str,
     signature: &'static str,
-    // TODO: make `run` a variant that can be either `Sync` or `Async`                                                                                              
-    run: for<'a> fn(&'a mut App, &'a str) -> Pin<Box<dyn Future<Output = ()> + 'a>>
+    run: CommandRun
 }
 
 const COMMANDS: &[Command] = &[
@@ -104,7 +110,7 @@ const COMMANDS: &[Command] = &[
         name: "help",
         description: "Helps, duh",
         signature: "/help",
-        run: |app, _| Box::pin(async move {
+        run: CommandRun::Sync(|app, _| {
             app.shared.add_message(Line::from("Help:"));
 
             for Command {description, signature, ..} in COMMANDS {
@@ -116,13 +122,13 @@ const COMMANDS: &[Command] = &[
         name: "clear",
         description: "Clears the chat",
         signature: "/clear",
-        run: |app, _| Box::pin(async move {app.shared.messages.lock().unwrap().clear()})
+        run: CommandRun::Sync(|app, _| app.shared.messages.lock().unwrap().clear())
     },
     Command {
         name: "name",
         description: "Change your display name",
         signature: "/name <new name>",
-        run: |app, new_name| Box::pin(async move {
+        run: CommandRun::Async(|app, new_name| Box::pin(async move {
             if new_name.is_empty() {
                 app.shared.add_message("usage: /name <new name>".into());
                 return;
@@ -145,13 +151,13 @@ const COMMANDS: &[Command] = &[
                 }
                 Err(err) => app.shared.add_message(format!("name: failed to change your display name: {err}").into())
             }
-        })
+        }))
     },
     Command {
         name: "color",
         description: "Change your color",
         signature: "/color <new color>",
-        run: |app, new_color| Box::pin(async move {
+        run: CommandRun::Async(|app, new_color| Box::pin(async move {
             if new_color.is_empty() {
                 app.shared.add_message("usage: /color <new color>".into());
                 return;
@@ -182,25 +188,25 @@ const COMMANDS: &[Command] = &[
                 }
                 Err(_) => app.shared.add_message(format!("color: `{new_color}` not supported, maybe try hex code for that color?").into())
             }
-        })
+        }))
     },
     Command {
         name: "exit",
         description: "Exits the app",
         signature: "/exit",
-        run: |app, _unused| Box::pin(async move {exit_app(app, _unused)})
+        run: CommandRun::Sync(exit_app)
     },
     Command {
         name: "quit",
         description: "Does the same as /exit",
         signature: "/quit",
-        run: |app, _unused| Box::pin(async move {exit_app(app, _unused)})
+        run: CommandRun::Sync(exit_app)
     },
     Command {
         name: "disconnect",
         description: "Disconnect but does not exit",
         signature: "/disconnect",
-        run: |app, _| Box::pin(async move {
+        run: CommandRun::Sync(|app, _| {
             app.shared.connection.store(false, Ordering::Relaxed);
 
             app.shared.messages.lock().unwrap().clear();
@@ -404,7 +410,10 @@ impl App {
                         let args = cmd.strip_prefix(cmd_name).unwrap_or("").trim();
 
                         if let Some(command) = COMMANDS.iter().find(|c| c.name == cmd_name) {
-                            (command.run)(self, args).await;
+                            match command.run {
+                                CommandRun::Sync(sync_fn) => sync_fn(self, args),
+                                CommandRun::Async(async_fn) => async_fn(self, args).await
+                            }
                         } else {
                             self.shared.add_message(format!("CMD: Unknown command: {cmd_name}").into());
                         }

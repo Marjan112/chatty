@@ -171,7 +171,7 @@ impl ScrollState {
     }
 
     fn update_from_paragraph(&mut self, paragraph: &Paragraph<'_>, area: Rect) {
-        let line_count = paragraph.line_count(area.width - 2);
+        let line_count = paragraph.line_count(area.width.saturating_sub(2));
         let visible_lines = area.height as usize;
         self.max = line_count.saturating_sub(visible_lines);
 
@@ -438,14 +438,12 @@ impl Ui {
             Constraint::Min(3),
             Constraint::Length(3)
         ])
-        .margin(1)
         .areas(frame.area());
 
         let [chat_window_area, client_list_area] = Layout::horizontal([
-            Constraint::Min(3),
-            Constraint::Length(15)
+            Constraint::Min(50),
+            Constraint::Length(25)
         ])
-        .spacing(1)
         .areas(top_area);
 
         self.chat_window_area = chat_window_area;
@@ -466,12 +464,13 @@ impl Ui {
 
         for (name, color) in lock.iter() {
             let line = Line::styled(
-                format!("• {name}"),
+                name,
                 Style::default().fg((*color).into())
             );
             clients.push(line);
         }
 
+        // TODO: `list` should be a `List` and not a `Paragraph`
         let list = Paragraph::new(clients)
             .wrap(Wrap { trim: true })
             .block(block)
@@ -481,8 +480,11 @@ impl Ui {
 
         frame.render_widget(list, self.client_list_area);
         frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight),
-            self.client_list_area,
+            Scrollbar::default()
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(None),
+            self.client_list_area.inner(Margin::new(0, 1)),
             &mut self.client_list_scroll.bar);
     }
 
@@ -502,8 +504,11 @@ impl Ui {
 
         frame.render_widget(chat, self.chat_window_area);
         frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight),
-            self.chat_window_area,
+            Scrollbar::default()
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(None),
+            self.chat_window_area.inner(Margin::new(0, 1)),
             &mut self.chat_scroll.bar,
         );
     }

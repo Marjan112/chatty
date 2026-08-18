@@ -9,7 +9,6 @@ use ratatui::{
 use ratatui_textarea::{DataCursor, TextArea};
 
 use crate::Shared;
-use crate::env::CHATTY_VERSION;
 
 #[derive(Default)]
 pub struct Popup<'a> {
@@ -200,11 +199,11 @@ impl ScrollState {
     }
 
     fn scroll_up(&mut self) {
-        self.scroll_up_by(1);
+        self.scroll_up_by(3);
     }
 
     fn scroll_down(&mut self) {
-        self.scroll_down_by(1);
+        self.scroll_down_by(3);
     }
 
     fn page_up(&mut self, height: u16) {
@@ -345,12 +344,12 @@ impl Ui {
             .flex(Flex::Center)
             .areas(frame.area());
 
-        let [horizontal] = Layout::horizontal([Constraint::Percentage(40)])
+        let [horizontal] = Layout::horizontal([Constraint::Max(40)])
             .flex(Flex::Center)
             .areas(vertical);
 
         let container = Block::bordered()
-            .title(format!(" ChaTTY ({CHATTY_VERSION}) - Connect "))
+            .title(" ChaTTY - Connect ")
             .title_alignment(HorizontalAlignment::Center)
             .title_bottom(vec![
                 " <TAB> ".yellow(),
@@ -607,5 +606,9 @@ impl Ui {
 
     pub fn chat_page_down(&mut self) {
         self.chat_scroll.page_down(self.chat_window_area.height);
+    }
+
+    pub fn chat_auto_scroll(&mut self) {
+        self.chat_scroll.auto = true;
     }
 }

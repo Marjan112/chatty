@@ -457,6 +457,7 @@ impl App {
                     }
 
                     self.ui.chat_prompt.textarea.clear();
+                    self.ui.chat_auto_scroll();
                 }
             }
             KeyCode::PageUp => self.ui.chat_page_up(),

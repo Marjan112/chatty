@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Layout, HorizontalAlignment, Constraint, Rect, Flex, Margin},
-    widgets::{Block, Borders, Paragraph, Wrap, Scrollbar, ScrollbarState, ScrollbarOrientation, Widget, Clear, List, ListState},
+    widgets::{Block, Borders, Paragraph, Wrap, Scrollbar, ScrollbarState, Widget, Clear, List, ListState},
     style::{Style, Stylize, Color},
     text::{Span, Line, Text},
     buffer::Buffer,
@@ -455,24 +455,17 @@ impl Ui {
     }
 
     fn draw_client_list(&mut self, frame: &mut Frame, shared: &Shared) {
-        let lock = shared.clients.lock().unwrap();
-        let mut clients = Vec::with_capacity(lock.len());
+        let clients_lock = shared.clients.lock().unwrap();
+        let clients: Vec<_> = clients_lock
+            .iter()
+            .map(|(name, color)| Line::styled(name, Style::default().fg((*color).into())))
+            .collect();
 
         let block = Block::bordered()
-            .title(format!(" Clients ({}) ", lock.len()).yellow())
+            .title(format!(" Clients ({}) ", clients.len()).yellow())
             .title_alignment(HorizontalAlignment::Center);
 
-        for (name, color) in lock.iter() {
-            let line = Line::styled(
-                name,
-                Style::default().fg((*color).into())
-            );
-            clients.push(line);
-        }
-
-        // TODO: `list` should be a `List` and not a `Paragraph`
         let list = Paragraph::new(clients)
-            .wrap(Wrap { trim: true })
             .block(block)
             .scroll((self.client_list_scroll.scroll as u16, 0));
 

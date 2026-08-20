@@ -1,7 +1,8 @@
 #![allow(clippy::collapsible_if)]
 
 use std::{
-    io,
+    io::{self, BufReader},
+    fs::File,
     net::{SocketAddr, ToSocketAddrs},
     sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
@@ -32,9 +33,19 @@ use ratatui::{
 };
 use clap::{Parser, builder::NonEmptyStringValueParser};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpStream, tcp::OwnedWriteHalf}
+    io::{AsyncReadExt, AsyncWriteExt, AsyncRead, AsyncWrite, WriteHalf},
+    net::TcpStream
 };
+use tokio_rustls::{
+    TlsConnector,
+    client::TlsStream,
+    rustls::{
+        ClientConfig,
+        RootCertStore,
+        pki_types::{CertificateDer, ServerName}
+    }
+};
+use rustls_pemfile::certs;
 
 mod chat_color;
 use chat_color::*;
@@ -217,7 +228,7 @@ const COMMANDS: &[Command] = &[
     }
 ];
 
-async fn init_handshake(stream: &mut TcpStream) -> io::Result<()> {
+async fn init_handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> io::Result<()> {
     stream.write_all(b"ChaTTY\0\0").await?;
 
     let mut server_magic_buf = [0u8; 8];
@@ -278,19 +289,48 @@ fn spawn_event_signaler(tx: std::sync::mpsc::Sender<Event>) {
     });
 }
 
+fn tls_connector() -> io::Result<TlsConnector> {
+    let file = File::open("certs/chatty-ca.pem")?;
+    let mut reader = BufReader::new(file);
+
+    let certs: Vec<CertificateDer> = certs(&mut reader).collect::<Result<_, _>>()
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+
+    let mut root_store = RootCertStore::empty();
+
+    for cert in certs {
+        root_store
+            .add(cert)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    }
+
+    let config = ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+
+    Ok(TlsConnector::from(Arc::new(config)))
+}
+
 #[derive(Default)]
 struct App {
     ui: Ui,
     shared: Arc<Shared>,
-    writer: Option<OwnedWriteHalf>
+    writer: Option<WriteHalf<TlsStream<TcpStream>>>
 }
 
 impl App {
     async fn connect(&mut self, address: SocketAddr, name: String) -> io::Result<()> {
-        let mut stream = TcpStream::connect(address).await?;
-        init_handshake(&mut stream).await?;
+        let stream = TcpStream::connect(address).await?;
 
-        let (reader, mut writer) = stream.into_split();
+        let connector = tls_connector()?;
+        let server_name = ServerName::try_from("localhost")
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+
+        let mut tls_stream = connector.connect(server_name, stream).await?;
+
+        init_handshake(&mut tls_stream).await?;
+
+        let (reader, mut writer) = tokio::io::split(tls_stream);
 
         send_message(
             &mut writer,

@@ -21,3 +21,4 @@ clap = { version = "4.6.5", features = ["derive"] }
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-rustls = "0.26.4"
 rustls = "0.23.43"
+rustls-pemfile = "2.2.0"

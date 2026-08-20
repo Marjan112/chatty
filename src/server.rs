@@ -1,15 +1,18 @@
 use std::{
-    io,
+    fs::File,
     net::SocketAddr,
     collections::HashMap,
     hash::{Hash, Hasher, DefaultHasher},
     sync::Arc
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    sync::{RwLock, Mutex, mpsc::{self, Sender, Receiver}}
+    io::{AsyncReadExt, AsyncWriteExt, AsyncRead, AsyncWrite},
+    net::TcpListener,
+    sync::{RwLock, Mutex, mpsc::{self, Sender}}
 };
+use rustls::ServerConfig;
+use rustls_pemfile::{certs, private_key};
+use tokio_rustls::TlsAcceptor;
 use chrono::Local;
 use clap::Parser;
 
@@ -43,14 +46,14 @@ impl Client {
     }
 }
 
-async fn init_handshake(stream: &mut TcpStream) -> io::Result<()> {
+async fn init_handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> std::io::Result<()> {
     const EXPECTED_MAGIC: &[u8] = b"ChaTTY\0\0";
     let mut magic = [0u8; 8];
 
     stream.read_exact(&mut magic).await?;
     
     if magic != EXPECTED_MAGIC {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid client"));
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid client"));
     }
 
     stream.write_all(EXPECTED_MAGIC).await?;
@@ -64,6 +67,28 @@ struct Server {
 }
 
 impl Server {
+    fn tls_config() -> std::io::Result<TlsAcceptor> {
+        let cert_file = File::open("certs/chatty-server.pem")?;
+        let key_file = File::open("certs/chatty-server.key")?;
+
+        let mut cert_reader = std::io::BufReader::new(cert_file);
+        let mut key_reader = std::io::BufReader::new(key_file);
+
+        let certs = certs(&mut cert_reader)
+            .collect::<Result<_, _>>()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+
+        let key = private_key(&mut key_reader)?
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no private key found"))?;
+
+        let config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("invalid TLS config: {err}")))?;
+
+        Ok(TlsAcceptor::from(Arc::new(config)))
+    }
+
     fn new() -> Self {
         Self {
             clients: RwLock::new(HashMap::new()),
@@ -313,13 +338,23 @@ impl Server {
     }
 }
 
-async fn handle_client(server: Arc<Server>, client_id: u64, mut stream: TcpStream, mut rx: Receiver<(Option<i64>, Message)>) -> io::Result<()> {
+async fn handle_client<S>(server: Arc<Server>, client_id: u64, mut stream: S, addr: SocketAddr) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static
+{
     if let Err(err) = init_handshake(&mut stream).await {
         server.client_disconnect(client_id, err.to_string()).await;
         return Ok(());
     }
 
-    let (mut reader, mut writer) = stream.into_split();
+    let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<(Option<i64>, Message)>(64);
+
+    server.clients
+        .write()
+        .await
+        .insert(client_id, Client::new(addr, outgoing_tx));
+
+    let (mut reader, mut writer) = tokio::io::split(stream);
 
     let server_reader = server.clone();
     let reader_task = tokio::spawn(async move {
@@ -335,7 +370,7 @@ async fn handle_client(server: Arc<Server>, client_id: u64, mut stream: TcpStrea
                         _ => {}
                     };
                 }
-                Err(err) if matches!(err.kind(), io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe) => {
+                Err(err) if matches!(err.kind(), std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe) => {
                     server_reader.client_disconnect(client_id, "connection closed").await;
                     break;
                 }
@@ -349,10 +384,10 @@ async fn handle_client(server: Arc<Server>, client_id: u64, mut stream: TcpStrea
     
     let server_writer = server.clone();
     let writer_task = tokio::spawn(async move {
-        while let Some((timestamp, message)) = rx.recv().await {
+        while let Some((timestamp, message)) = outgoing_rx.recv().await {
             if let Err(err) = send_message(&mut writer, &message, timestamp).await {
                 let reason = match err.kind() {
-                    io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe => String::from("connection closed"),
+                    std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe => String::from("connection closed"),
                     _ => err.to_string()
                 };
                 server_writer.client_disconnect(client_id, reason).await;
@@ -379,12 +414,17 @@ struct Args {
 }
 
 #[tokio::main]
-async fn main() -> io::Result<()> {
+async fn main() -> std::io::Result<()> {
     let args = Args::parse();
 
     println!("INFO: ChaTTY server {CHATTY_VERSION}");
 
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", args.port.unwrap_or(0))).await?; 
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", args.port.unwrap_or(0)))
+        .await
+        .inspect_err(|err| eprintln!("ERROR: failed to bind: {err}"))?; 
+    let tls_acceptor = Server::tls_config()
+        .inspect_err(|err| eprintln!("ERROR: TLS config failed: {err}"))?;
+
     println!("INFO: listening on port {}...", listener.local_addr()?.port());
 
     let server = Arc::new(Server::new());
@@ -395,15 +435,17 @@ async fn main() -> io::Result<()> {
             Ok((stream, addr)) => {
                 println!("INFO: accepted new client {addr}");
 
-                let (outgoing_tx, outgoing_rx) = mpsc::channel::<(Option<i64>, Message)>(64);
-
                 client_id += 1;
-                server.clients.write().await.insert(client_id, Client::new(addr, outgoing_tx));
 
                 let server = server.clone();
+                let tls_acceptor = tls_acceptor.clone();
 
                 tokio::spawn(async move {
-                    handle_client(server, client_id, stream, outgoing_rx).await
+                    let tls_stream = tls_acceptor.accept(stream)
+                        .await
+                        .inspect_err(|err| eprintln!("ERROR: TLS handshake failed for {addr}: {err}"))?; 
+
+                    handle_client(server, client_id, tls_stream, addr).await
                 });
             }
             Err(err) => eprintln!("ERROR: failed to accept new client: {err}")

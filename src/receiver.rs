@@ -83,7 +83,7 @@ fn handle_receive_error(err: io::Error, shared: &Shared) {
     }
 }
 
-pub fn spawn_receiver<R: AsyncRead + Unpin + Send + 'static>(mut reader: R, shared: Arc<Shared>)  {
+pub fn spawn_receiver<R: AsyncRead + Unpin + Send + 'static>(mut reader: R, shared: Arc<Shared>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while shared.connection.load(Ordering::Relaxed) {
             match receive_message(&mut reader).await {
@@ -91,5 +91,5 @@ pub fn spawn_receiver<R: AsyncRead + Unpin + Send + 'static>(mut reader: R, shar
                 Err(err) => handle_receive_error(err, &shared)
             }
         }
-    });
+    })
 }

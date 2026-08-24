@@ -1,5 +1,6 @@
 use std::{
-    fs::File,
+    io::Write,
+    fs,
     net::SocketAddr,
     collections::HashMap,
     hash::{Hash, Hasher, DefaultHasher},
@@ -10,11 +11,18 @@ use tokio::{
     net::TcpListener,
     sync::{RwLock, Mutex, mpsc::{self, Sender}}
 };
-use rustls::ServerConfig;
+use rustls::{
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    ServerConfig
+};
 use rustls_pemfile::{certs, private_key};
 use tokio_rustls::TlsAcceptor;
+use rcgen::generate_simple_self_signed;
 use chrono::Local;
 use clap::Parser;
+
+mod fingerprint;
+use fingerprint::*;
 
 mod chat_color;
 use chat_color::*;
@@ -61,6 +69,67 @@ async fn init_handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> st
     Ok(())
 }
 
+struct ServerIdentity {
+    certificate: CertificateDer<'static>,
+    private_key: PrivateKeyDer<'static>,
+    fingerprint: Fingerprint
+}
+
+impl ServerIdentity {
+    fn load() -> std::io::Result<Self> {
+        let home = std::env::home_dir()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "home directory not found"))?;
+        let chatty_config = home.join(".chatty");
+        fs::create_dir_all(&chatty_config)?;
+
+        let cert_path = chatty_config.join("server.crt");
+        let key_path = chatty_config.join("server.key");
+        
+        let (certificate, private_key) = if cert_path.exists() && key_path.exists() {
+            let cert_file = fs::File::open(&cert_path)?;
+            let key_file = fs::File::open(&key_path)?;
+
+            let mut cert_reader = std::io::BufReader::new(cert_file);
+            let mut key_reader = std::io::BufReader::new(key_file);
+
+            let mut certs: Vec<CertificateDer> = certs(&mut cert_reader)
+                .collect::<Result<_, _>>()
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+
+            let certificate = certs
+                .pop()
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no certificate found"))?;
+
+            let private_key = private_key(&mut key_reader)?
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no private key found"))?;
+
+            (certificate, private_key)
+        } else {
+            let cert = generate_simple_self_signed(Vec::new())
+                .map_err(|err| std::io::Error::other(err.to_string()))?;
+
+            let certificate = CertificateDer::from(cert.cert.der().to_vec());
+            let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()));
+
+            let mut cert_file = fs::File::create(&cert_path)?;
+            let mut key_file = fs::File::create(&key_path)?;
+
+            cert_file.write_all(cert.cert.pem().as_bytes())?;
+            key_file.write_all(cert.signing_key.serialize_pem().as_bytes())?;
+
+            (certificate, private_key)
+        };
+
+        let fingerprint = Fingerprint::from_certificate(&certificate);
+
+        Ok(Self {
+            certificate,
+            private_key,
+            fingerprint
+        })
+    }
+}
+
 struct Server {
     clients: RwLock<HashMap<u64, Client>>,
     messages: Mutex<Vec<(i64, Message)>>
@@ -68,23 +137,15 @@ struct Server {
 
 impl Server {
     fn tls_config() -> std::io::Result<TlsAcceptor> {
-        let cert_file = File::open("certs/chatty-server.pem")?;
-        let key_file = File::open("certs/chatty-server.key")?;
-
-        let mut cert_reader = std::io::BufReader::new(cert_file);
-        let mut key_reader = std::io::BufReader::new(key_file);
-
-        let certs = certs(&mut cert_reader)
-            .collect::<Result<_, _>>()
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-
-        let key = private_key(&mut key_reader)?
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no private key found"))?;
+        let identity = ServerIdentity::load()?; 
 
         let config = ServerConfig::builder()
             .with_no_client_auth()
-            .with_single_cert(certs, key)
+            .with_single_cert(vec![identity.certificate], identity.private_key)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("invalid TLS config: {err}")))?;
+
+        println!("INFO: server fingerprint:");
+        println!("{}", identity.fingerprint);
 
         Ok(TlsAcceptor::from(Arc::new(config)))
     }
@@ -119,11 +180,6 @@ impl Server {
                 None => return
             }
         };
-
-        if client.name.is_empty() {
-            println!("INFO: disconnected unauthenticated client {} | {}", client.addr, reason);
-            return;
-        }
 
         let timestamp = Local::now().timestamp();
 
@@ -409,17 +465,21 @@ where
 #[command(version = CHATTY_VERSION)]
 struct Args {
     /// The port that the server will bind to
-    #[arg(long)]
-    port: Option<u16>
+    #[arg(long, default_value_t = 0)]
+    port: u16
 }
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     let args = Args::parse();
 
     println!("INFO: ChaTTY server {CHATTY_VERSION}");
 
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", args.port.unwrap_or(0)))
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", args.port))
         .await
         .inspect_err(|err| eprintln!("ERROR: failed to bind: {err}"))?; 
     let tls_acceptor = Server::tls_config()
@@ -433,20 +493,19 @@ async fn main() -> std::io::Result<()> {
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
-                println!("INFO: accepted new client {addr}");
-
                 client_id += 1;
 
                 let server = server.clone();
                 let tls_acceptor = tls_acceptor.clone();
 
-                tokio::spawn(async move {
-                    let tls_stream = tls_acceptor.accept(stream)
-                        .await
-                        .inspect_err(|err| eprintln!("ERROR: TLS handshake failed for {addr}: {err}"))?; 
-
+                let join_handle = tokio::spawn(async move {
+                    let tls_stream = tls_acceptor.accept(stream).await?;
                     handle_client(server, client_id, tls_stream, addr).await
                 });
+
+                if let Err(err) = join_handle.await {
+                    eprintln!("ERROR: {addr}: {err}");
+                }
             }
             Err(err) => eprintln!("ERROR: failed to accept new client: {err}")
         }

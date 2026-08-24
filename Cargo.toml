@@ -20,5 +20,7 @@ ratatui-textarea = "0.9.0"
 clap = { version = "4.6.5", features = ["derive"] }
 tokio = { version = "1.53.1", features = ["full"] }
 tokio-rustls = "0.26.4"
-rustls = "0.23.43"
+rustls = { version = "0.23.43", features = ["ring"] }
 rustls-pemfile = "2.2.0"
+rcgen = "0.14.9"
+sha2 = "0.11.0"

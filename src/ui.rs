@@ -9,6 +9,7 @@ use ratatui::{
 use ratatui_textarea::{DataCursor, TextArea};
 
 use crate::Shared;
+use crate::Fingerprint;
 
 #[derive(Default)]
 pub struct Popup<'a> {
@@ -18,7 +19,7 @@ pub struct Popup<'a> {
     border_style: Style,
     title_style: Style,
     style: Style,
-    title_alignment: HorizontalAlignment,
+    title_alignment: HorizontalAlignment
 }
 
 impl<'a> Popup<'a> {
@@ -64,10 +65,10 @@ impl<'a> Popup<'a> {
     }
 
     fn render_centered(self, area: Rect, buf: &mut Buffer) {
-        let [vertical] = Layout::vertical([Constraint::Max(10)])
+        let [vertical] = Layout::vertical([Constraint::Max(12)])
             .flex(Flex::Center)
             .areas(area);
-        let [horizontal] = Layout::horizontal([Constraint::Max(40)])
+        let [horizontal] = Layout::horizontal([Constraint::Max(71)])
             .flex(Flex::Center)
             .areas(vertical);
 
@@ -93,9 +94,15 @@ impl Widget for Popup<'_> {
     }
 }
 
+#[derive(Clone)]
 pub enum ActivePopup {
     Info(String),
-    Error(String)
+    Error(String),
+    VerifyConnect {
+        host: String,
+        fingerprint: Fingerprint,
+        message: String
+    }
 }
 
 impl ActivePopup {
@@ -121,6 +128,20 @@ impl ActivePopup {
                     .title_bottom(vec![" <ESC> ".light_red(), "dismiss ".dark_gray()])
                     .title_style(Style::default().light_red())
                     .border_style(Style::default().light_red())
+                    .render_centered(area, frame.buffer_mut()),
+            ActivePopup::VerifyConnect { message, .. } =>
+                Popup::default()
+                    .content(message.as_str())
+                    .style(Style::default())
+                    .title_alignment(HorizontalAlignment::Center)
+                    .title(" Verification ")
+                    .title_bottom(vec![
+                        " <Y> ".green(), "yes ".dark_gray(),
+                        "|".reset(),
+                        " <N> ".green(), "no ".dark_gray()
+                    ])
+                    .title_style(Style::default().green())
+                    .border_style(Style::default().green())
                     .render_centered(area, frame.buffer_mut())
         }
     }

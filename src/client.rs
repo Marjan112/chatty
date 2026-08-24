@@ -1,14 +1,14 @@
 #![allow(clippy::collapsible_if)]
 
 use std::{
-    io::{self, BufReader},
-    fs::File,
-    net::{SocketAddr, ToSocketAddrs},
-    sync::{Arc, atomic::Ordering},
+    io::{self, Write},
+    fs,
+    sync::{Arc, atomic::Ordering, Mutex},
     time::{Duration, Instant},
     thread,
     future::Future,
-    pin::Pin
+    pin::Pin,
+    collections::HashMap
 };
 use ratatui::{
     Terminal,
@@ -41,11 +41,14 @@ use tokio_rustls::{
     client::TlsStream,
     rustls::{
         ClientConfig,
-        RootCertStore,
-        pki_types::{CertificateDer, ServerName}
+        client::danger::{ServerCertVerified, ServerCertVerifier},
+        pki_types::{CertificateDer, ServerName, UnixTime},
+        DigitallySignedStruct, Error as TlsError, SignatureScheme
     }
 };
-use rustls_pemfile::certs;
+
+mod fingerprint;
+use fingerprint::*;
 
 mod chat_color;
 use chat_color::*;
@@ -73,33 +76,37 @@ fn exit_app(app: &mut App, _: &str) {
     app.shared.exit.store(true, Ordering::Relaxed);
 }
 
-fn validate_name(name: &str) -> Result<String, &'static str> {
+fn validate_name(name: &str) -> io::Result<String> {
     let trimmed = name.trim();
 
     if trimmed.is_empty() {
-        return Err("name cannot be empty");
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "name cannot be empty"));
     }
     if trimmed.len() > 25 {
-        return Err("name is too long");
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "name is too long"));
     }
     if !trimmed.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '_' || c == '-') {
-        return Err("name must be alphanumeric, can contain dots, underscores and dashes");
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "name must be alphanumeric, can contain dots, underscores and dashes"));
     }
 
     Ok(trimmed.to_string())
 }
 
-fn validate_address(address: &str) -> Result<SocketAddr, String> {
-    let trimmed = address.trim();
+fn validate_address(address: &str) -> io::Result<(String, String)> {
+    let trimmed = address.trim().to_string();
 
     if trimmed.is_empty() {
-        return Err("address cannot be empty".into());
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "address cannot be empty"));
     }
 
-    trimmed.to_socket_addrs()
-        .map_err(|err| err.to_string())?
-        .find(|addr| matches!(addr, SocketAddr::V4(_)))
-        .ok_or_else(|| "no IPv4 address found".into())
+    if trimmed.chars().all(|c| c.is_control()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid address"));
+    }
+
+    trimmed
+        .rsplit_once(':')
+        .map(|(host, port)| (host.to_string(), port.to_string()))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid address"))
 }
 
 type CommandFuture<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
@@ -223,7 +230,11 @@ const COMMANDS: &[Command] = &[
             app.shared.messages.lock().unwrap().clear();
             app.shared.clients.lock().unwrap().clear();
 
-            app.writer.take();
+            if let Some(handle) = app.receiver_task.take() {
+                handle.abort();
+            }
+
+            app.writer = None;
         })
     }
 ];
@@ -289,48 +300,230 @@ fn spawn_event_signaler(tx: std::sync::mpsc::Sender<Event>) {
     });
 }
 
-fn tls_connector() -> io::Result<TlsConnector> {
-    let file = File::open("certs/chatty-ca.pem")?;
-    let mut reader = BufReader::new(file);
+#[derive(Debug)]
+struct TofuVerifier { 
+    received_key_fingerprint: Arc<Mutex<Option<Fingerprint>>>,
+    expected_key_fingerprint: Option<Fingerprint>
+}
 
-    let certs: Vec<CertificateDer> = certs(&mut reader).collect::<Result<_, _>>()
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+impl TofuVerifier {
+    fn new(expected_key_fingerprint: Option<Fingerprint>) -> Self {
+        Self {
+            received_key_fingerprint: Arc::default(),
+            expected_key_fingerprint
+        }
+    }
+}
 
-    let mut root_store = RootCertStore::empty();
-
-    for cert in certs {
-        root_store
-            .add(cert)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+impl ServerCertVerifier for TofuVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, TlsError> {
+        let received = Fingerprint::from_certificate(end_entity);
+        match self.expected_key_fingerprint {
+            Some(expected) if received != expected => {
+                let error_message = format!(concat!(
+                    "REMOTE HOST IDENTIFICATION HAS CHANGED!\n",
+                    "Someone could be eavesdropping on you right now (MITM attack)!\n",
+                    "It is also possible that the host key has just been changed.\n",
+                    "Expected key fingerprint:\n",
+                    "{}\n",
+                    "Received key fingerprint:\n",
+                    "{}"
+                ), expected, received);
+                Err(TlsError::General(error_message))
+            }
+            Some(_) | None => {
+                *self.received_key_fingerprint.lock().unwrap() = Some(received);
+                Ok(ServerCertVerified::assertion())
+            }
+        }
     }
 
-    let config = ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, TlsError> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms
+        )
+    }
 
-    Ok(TlsConnector::from(Arc::new(config)))
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, TlsError> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
 #[derive(Default)]
+struct KnownHosts {
+    hosts: HashMap<String, Fingerprint>
+}
+
+impl KnownHosts {
+    fn load() -> io::Result<Self> {
+        let home = std::env::home_dir()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory not found"))?;
+        let known_hosts_path = home
+            .join(".chatty")
+            .join("known_hosts");
+
+        if !known_hosts_path.exists() {
+            return Ok(Self::default());
+        }
+
+        let mut hosts = HashMap::new();
+
+        let contents = fs::read_to_string(&known_hosts_path)?;
+        for (i, line) in contents.lines().enumerate() {
+            let mut parts = line.split_whitespace();
+            let line_number = i + 1;
+
+            let host = parts
+                .next()
+                .ok_or_else(|| io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: missing host on line {}", known_hosts_path.display(), line_number)
+                ))?;
+
+            let fingerprint = parts
+                .next()
+                .ok_or_else(|| io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}: missing fingerprint on line {}", known_hosts_path.display(), line_number)
+                ))?;
+
+            let fingerprint = fingerprint
+                .strip_prefix("SHA256:")
+                .ok_or_else(|| io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}:{}: fingerprint must begin with `SHA256:` prefix", known_hosts_path.display(), line_number)
+                ))?;
+
+            if fingerprint.len() != 64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}:{}: fingerprint must contain 64 hexadecimal characters", known_hosts_path.display(), line_number)
+                ));
+            }
+
+            let mut fingerprint_result = Fingerprint::empty();
+
+            for j in 0..32 {
+                fingerprint_result.0[j] = u8::from_str_radix(&fingerprint[j*2..j*2+2], 16)
+                    .map_err(|_| io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}:{}: invalid fingerprint", known_hosts_path.display(), line_number)
+                    ))?;
+            }
+
+            hosts.insert(host.to_string(), fingerprint_result);
+        }
+
+        Ok(Self { hosts })
+    }
+
+    fn save(&self) -> io::Result<()> {
+        let home = std::env::home_dir()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory not found"))?;
+        let chatty_dir_path = home.join(".chatty");
+        fs::create_dir_all(&chatty_dir_path)?;
+        let known_hosts_path = chatty_dir_path.join("known_hosts");
+
+        let mut f = fs::File::create(known_hosts_path)?;
+
+        for (host, fingerprint) in &self.hosts {
+            writeln!(f, "{host} {fingerprint}")?;
+        }
+
+        Ok(())
+    }
+
+    fn get(&self, host: &str) -> Option<&Fingerprint> {
+        self.hosts.get(host)
+    }
+
+    fn add(&mut self, host: String, fingerprint: Fingerprint) {
+        self.hosts.insert(host, fingerprint);
+    }
+}
+
+fn tls_config(known_host: Option<Fingerprint>) -> io::Result<(TlsConnector, Arc<TofuVerifier>)> {
+    let verifier = Arc::new(TofuVerifier::new(known_host));
+
+    let config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier.clone())
+        .with_no_client_auth();
+
+    Ok((TlsConnector::from(Arc::new(config)), verifier))
+}
+
+async fn create_tls_stream(known_hosts: &KnownHosts, host: &str, port: &str) -> io::Result<(TlsStream<TcpStream>, Arc<TofuVerifier>)> {
+    let (connector, verifier) = tls_config(known_hosts.get(host).cloned())?;
+
+    let raw_tcp = TcpStream::connect(format!("{host}:{port}")).await?;
+
+    let server_name = ServerName::try_from(host.to_string())
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
+
+    let tls_stream = tokio::time::timeout(Duration::from_secs(5), connector.connect(server_name, raw_tcp)).await??;
+
+    Ok((tls_stream, verifier))
+}
+
 struct App {
     ui: Ui,
     shared: Arc<Shared>,
-    writer: Option<WriteHalf<TlsStream<TcpStream>>>
+    writer: Option<WriteHalf<TlsStream<TcpStream>>>,
+    receiver_task: Option<tokio::task::JoinHandle<()>>,
+    known_hosts: KnownHosts,
+    tls_stream: Option<TlsStream<TcpStream>>
 }
 
 impl App {
-    async fn connect(&mut self, address: SocketAddr, name: String) -> io::Result<()> {
-        let stream = TcpStream::connect(address).await?;
+    fn new() -> io::Result<Self> {
+        Ok(Self {
+            ui: Ui::default(),
+            shared: Arc::default(),
+            writer: None,
+            receiver_task: None,
+            known_hosts: KnownHosts::load()?,
+            tls_stream: None
+        })
+    }
 
-        let connector = tls_connector()?;
-        let server_name = ServerName::try_from("localhost")
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
-
-        let mut tls_stream = connector.connect(server_name, stream).await?;
-
+    async fn connect(&mut self, mut tls_stream: TlsStream<TcpStream>) -> io::Result<()> {
         init_handshake(&mut tls_stream).await?;
 
         let (reader, mut writer) = tokio::io::split(tls_stream);
+
+        let name = self.shared.name.lock().unwrap().clone();
 
         send_message(
             &mut writer,
@@ -345,24 +538,66 @@ impl App {
         self.shared.connection.store(true, Ordering::Relaxed);
         *self.shared.name.lock().unwrap() = name;
         *self.shared.messages.lock().unwrap() = greet_message();
-
-        spawn_receiver(reader, self.shared.clone());
+        self.receiver_task = Some(spawn_receiver(reader, self.shared.clone()));
 
         Ok(())
     }
 
-    async fn connect_with(&mut self, address: &str, name: &str) -> io::Result<()> {
-        let address = validate_address(address).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
-        let name = validate_name(name).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
-        self.connect(address, name).await
+    async fn verify_connect_from_cli(&mut self, address: &str, name: &str) -> io::Result<()> {
+        let (host, port) = validate_address(address)?;
+        let name = validate_name(name)?;
+
+        *self.shared.name.lock().unwrap() = name;
+
+        let (tls_stream, verifier) = create_tls_stream(&self.known_hosts, &host, &port).await?;
+
+        let received_key_fingerprint = verifier.received_key_fingerprint.lock().unwrap().unwrap();
+
+        if verifier.expected_key_fingerprint.is_none() {
+            println!("INFO: The authenticity of host `{host}` can't be established.");
+            println!("INFO: X.509 key fingerprint is: {received_key_fingerprint}");
+            println!("Are you sure you want to continue connecting (yes/no)?");
+
+            loop {
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+
+                match input.trim().to_lowercase().as_str() {
+                    "yes" => {
+                        self.known_hosts.add(host, received_key_fingerprint);
+                        return self.connect(tls_stream).await;
+                    }
+                    "no" => return Err(io::Error::other("user doesn't want to continue connecting")),
+                    _ => println!("Please enter yes or no.")
+                }
+            }
+        } else {
+            self.connect(tls_stream).await
+        }
     }
 
-    async fn connect_from_ui(&mut self) -> Result<(), String> {
-        let address = validate_address(&self.ui.address_input_box.lines()[0])?;
-        let name = validate_name(&self.ui.name_input_box.lines()[0])?;
-        self.connect(address, name)
-            .await
-            .map_err(|err| err.to_string())
+    async fn verify_connect_from_ui(&mut self) -> io::Result<()> {
+        let (host, port) = validate_address(&self.ui.address_input_box.lines()[0])?;
+        *self.shared.name.lock().unwrap() = validate_name(&self.ui.name_input_box.lines()[0])?;
+
+        let (tls_stream, verifier) = create_tls_stream(&self.known_hosts, &host, &port).await?;
+
+        let fingerprint = verifier.received_key_fingerprint.lock().unwrap().unwrap();
+
+        if verifier.expected_key_fingerprint.is_none() {
+            let message = format!(concat!(
+                "The authenticity of host `{}` can't be established.\n",
+                "X.509 key fingerprint is: {}\n",
+                "Are you sure you want to continue connecting?"
+            ), host, fingerprint);
+
+            *self.shared.popup.lock().unwrap() = Some(ActivePopup::VerifyConnect {host, fingerprint, message} );
+            self.tls_stream = Some(tls_stream);
+        } else {
+            self.connect(tls_stream).await?;
+        }
+
+        Ok(())
     }
 
     async fn handle_key_event(&mut self, key: KeyEvent) {
@@ -370,6 +605,9 @@ impl App {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.shared.exit.store(true, Ordering::Relaxed),
             KeyCode::Esc => {
                 let mut popup = self.shared.popup.lock().unwrap();
+                if let Some(ActivePopup::VerifyConnect {..}) = *popup {
+                    return;
+                }
                 if popup.is_some() {
                     *popup = None;
                 } else if self.ui.chat_prompt.completion_state.is_some() {
@@ -428,7 +666,7 @@ impl App {
                         }
                         ConnectFormField::Name => {
                             if !self.ui.address_input_box.is_empty() && !self.ui.name_input_box.is_empty() {
-                                if let Err(err) = self.connect_from_ui().await {
+                                if let Err(err) = self.verify_connect_from_ui().await {
                                     *self.shared.popup.lock().unwrap() = Some(ActivePopup::Error(format!("Failed to connect: {err}")));
                                 }
                             }
@@ -504,7 +742,25 @@ impl App {
             KeyCode::PageDown => self.ui.chat_page_down(),
             KeyCode::Up => self.ui.chat_prompt.history_prev(),
             KeyCode::Down => self.ui.chat_prompt.history_next(),
-            _ => {
+            other => {
+                let popup = self.shared.popup.lock().unwrap().clone();
+                if let Some(ActivePopup::VerifyConnect {host, fingerprint, ..}) = popup {
+                    if let KeyCode::Char('y') = other {
+                        let tls_stream = self.tls_stream.take().unwrap();
+                        self.known_hosts.add(host.to_string(), fingerprint);
+                        if let Err(err) = self.connect(tls_stream).await {
+                            *self.shared.popup.lock().unwrap() = Some(ActivePopup::Error(format!("Failed to connect: {err}")));
+                        } else {
+                            *self.shared.popup.lock().unwrap() = None;
+                        }
+                    } else if let KeyCode::Char('n') = other {
+                        let _ = self.tls_stream.take().unwrap().shutdown().await;
+                        *self.shared.popup.lock().unwrap() = None;
+                        self.shared.name.lock().unwrap().clear();
+                    }
+                    return;
+                }
+
                 if !self.shared.connection.load(Ordering::Relaxed) {
                     match self.ui.connect_form.focused {
                         ConnectFormField::Address => { self.ui.address_input_box.input(key); }
@@ -571,6 +827,10 @@ impl App {
                 }
             })?;
 
+            if !self.shared.connection.load(Ordering::Relaxed) {
+                self.writer = None;
+            }
+
             if let Some(writer) = &mut self.writer {
                 if get_client_list_timer.elapsed() >= Duration::from_secs(1) {
                     let _ = send_message(writer, &Message::GetClientList, None).await;
@@ -582,7 +842,12 @@ impl App {
             tokio::time::sleep(Duration::from_millis(16)).await;
         }
 
-        restore_terminal()
+        let _ = restore_terminal();
+
+        // TODO: this won't be run if user clicks the close button on their terminal
+        self.known_hosts
+            .save()
+            .inspect_err(|err| eprintln!("ERROR: Failed to save known hosts to database: {err}"))
     }
 }
 
@@ -600,12 +865,17 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     let args = Args::parse();
-    let mut app = App::default();
+    let mut app = App::new()
+        .inspect_err(|err| eprintln!("ERROR: Failed to initialize: {err}"))?;
 
     if let (Some(address), Some(name)) = (args.address, args.name) {
         println!("INFO: Trying to connect to `{address}` as `{name}`...");
-        app.connect_with(&address, &name)
+        app.verify_connect_from_cli(&address, &name)
             .await
             .inspect_err(|err| eprintln!("ERROR: Failed to connect: {err}"))?;
     }

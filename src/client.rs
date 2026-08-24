@@ -492,7 +492,7 @@ async fn create_tls_stream(known_hosts: &KnownHosts, host: &str, port: &str) -> 
     let server_name = ServerName::try_from(host.to_string())
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
 
-    let tls_stream = tokio::time::timeout(Duration::from_secs(5), connector.connect(server_name, raw_tcp)).await??;
+    let tls_stream = connector.connect(server_name, raw_tcp).await?;
 
     Ok((tls_stream, verifier))
 }

@@ -398,10 +398,7 @@ async fn handle_client<S>(server: Arc<Server>, client_id: u64, mut stream: S, ad
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static
 {
-    if let Err(err) = init_handshake(&mut stream).await {
-        server.client_disconnect(client_id, err.to_string()).await;
-        return Ok(());
-    }
+    init_handshake(&mut stream).await?;
 
     let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<(Option<i64>, Message)>(64);
 

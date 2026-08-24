@@ -5,6 +5,8 @@ use chrono::{format::{DelayedFormat, StrftimeItems}, Local, TimeZone};
 
 use crate::env::CHATTY_VERSION;
 
+pub const MAX_MESSAGES: usize = 200;
+
 #[macro_export]
 macro_rules! chat_error {
     ($messages:expr, $($arg:tt)*) => {

@@ -1,447 +1,513 @@
-use mio::{
-    net::{ TcpListener, TcpStream },
-    Events, Interest, Poll, Token
-};
 use std::{
-    io::{self, Write, Read},
+    io::Write,
+    fs,
     net::SocketAddr,
-    hash::{Hash, Hasher},
-    collections::hash_map::{DefaultHasher, HashMap}
+    collections::HashMap,
+    hash::{Hash, Hasher, DefaultHasher},
+    sync::Arc
 };
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt, AsyncRead, AsyncWrite},
+    net::TcpListener,
+    sync::{RwLock, Mutex, mpsc::{self, Sender}}
+};
+use rustls::{
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    ServerConfig
+};
+use rustls_pemfile::{certs, private_key};
+use tokio_rustls::TlsAcceptor;
+use rcgen::generate_simple_self_signed;
 use chrono::Local;
 use clap::Parser;
+
+mod fingerprint;
+use fingerprint::*;
 
 mod chat_color;
 use chat_color::*;
 
 mod message;
-use message::*;
-
-mod env;
-use env::*;
+use message::{Message, KickReason, send_message, receive_message};
 
 mod utils;
-use utils::*;
+use utils::{datetime_from_timestamp, MAX_MESSAGES};
+
+mod env;
+use crate::env::CHATTY_VERSION;
 
 struct Client {
-    stream: TcpStream,
+    addr: SocketAddr,
     name: String,
-    buffer: Vec<u8>,
     color: ChatColor,
-    handshake_finished: bool,
+    outgoing_tx: Sender<(Option<i64>, Message)>
 }
 
 impl Client {
-    const DEFAULT_COLORS: [ChatColor; 11] = [
-        ChatColor::Red,
-        ChatColor::Green,
-        ChatColor::Yellow,
-        ChatColor::Blue,
-        ChatColor::Magenta,
-        ChatColor::Cyan,
-        ChatColor::LightRed,
-        ChatColor::LightGreen,
-        ChatColor::LightYellow,
-        ChatColor::LightBlue,
-        ChatColor::LightMagenta
-    ];
+    fn new(addr: SocketAddr, outgoing_tx: Sender<(Option<i64>, Message)>) -> Self {
+        Self {
+            addr,
+            name: String::new(),
+            color: ChatColor::Reset,
+            outgoing_tx
+        }
+    }
+}
 
-    fn send_assigned_color(&mut self) {
-        let mut hasher = DefaultHasher::new();
-        self.name.to_lowercase().hash(&mut hasher);
-        let hash = hasher.finish();
-        let color_index = (hash as usize) % Client::DEFAULT_COLORS.len();
+async fn init_handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> std::io::Result<()> {
+    const EXPECTED_MAGIC: &[u8] = b"ChaTTY\0\0";
+    let mut magic = [0u8; 8];
 
-        self.color = Self::DEFAULT_COLORS[color_index];
-        let _ = send_message(&mut self.stream, Message::ClientAssignedColor { color: self.color }, None);
+    stream.read_exact(&mut magic).await?;
+    
+    if magic != EXPECTED_MAGIC {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid client"));
     }
 
-    pub fn receive_message(&mut self) -> io::Result<Option<(i64, Message)>> {
-        loop {
-            if self.buffer.len() >= 12 {
-                let len = u32::from_le_bytes(self.buffer[8..12].try_into().unwrap()) as usize;
-                if self.buffer.len() >= 12 + len {
-                    break;
-                }
-            }
+    stream.write_all(EXPECTED_MAGIC).await?;
 
-            let mut temp = [0u8; 1024];
-            match self.stream.read(&mut temp) {
-                Ok(0) => return Err(io::Error::new(io::ErrorKind::ConnectionReset, "connection closed")),
-                Ok(n) => self.buffer.extend_from_slice(&temp[..n]),
-                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(None),
-                Err(err) => return Err(err)
-            }
-        }
+    Ok(())
+}
 
-        if self.buffer.len() < 8 {
-            return Ok(None);
-        }
-        let timestamp = i64::from_le_bytes(self.buffer[0..8].try_into().unwrap());
+struct ServerIdentity {
+    certificate: CertificateDer<'static>,
+    private_key: PrivateKeyDer<'static>,
+    fingerprint: Fingerprint
+}
 
-        if self.buffer.len() < 12 {
-            return Ok(None);
-        }
-        let len = u32::from_le_bytes(self.buffer[8..12].try_into().unwrap()) as usize;
+impl ServerIdentity {
+    fn load() -> std::io::Result<Self> {
+        let home = std::env::home_dir()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "home directory not found"))?;
+        let chatty_config = home.join(".chatty");
+        fs::create_dir_all(&chatty_config)?;
 
-        if self.buffer.len() < 12 + len {
-            return Ok(None);
-        }
+        let cert_path = chatty_config.join("server.crt");
+        let key_path = chatty_config.join("server.key");
+        
+        let (certificate, private_key) = if cert_path.exists() && key_path.exists() {
+            let cert_file = fs::File::open(&cert_path)?;
+            let key_file = fs::File::open(&key_path)?;
 
-        let msg_bytes = self.buffer[12..(12 + len)].to_vec();
+            let mut cert_reader = std::io::BufReader::new(cert_file);
+            let mut key_reader = std::io::BufReader::new(key_file);
 
-        self.buffer.drain(0..(12 + len));
+            let mut certs: Vec<CertificateDer> = certs(&mut cert_reader)
+                .collect::<Result<_, _>>()
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
-        let msg = postcard::from_bytes(&msg_bytes)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("failed to deserialize message: {err}")))?;
+            let certificate = certs
+                .pop()
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no certificate found"))?;
 
-        Ok(Some((timestamp, msg)))
+            let private_key = private_key(&mut key_reader)?
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no private key found"))?;
+
+            (certificate, private_key)
+        } else {
+            let cert = generate_simple_self_signed(Vec::new())
+                .map_err(|err| std::io::Error::other(err.to_string()))?;
+
+            let certificate = CertificateDer::from(cert.cert.der().to_vec());
+            let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()));
+
+            let mut cert_file = fs::File::create(&cert_path)?;
+            let mut key_file = fs::File::create(&key_path)?;
+
+            cert_file.write_all(cert.cert.pem().as_bytes())?;
+            key_file.write_all(cert.signing_key.serialize_pem().as_bytes())?;
+
+            (certificate, private_key)
+        };
+
+        let fingerprint = Fingerprint::from_certificate(&certificate);
+
+        Ok(Self {
+            certificate,
+            private_key,
+            fingerprint
+        })
     }
 }
 
 struct Server {
-    listener: TcpListener,
-    poll: Poll,
-    clients: HashMap<Token, Client>,
-    messages: Vec<(i64, Message)>,
-    port: u16
+    clients: RwLock<HashMap<u64, Client>>,
+    messages: Mutex<Vec<(i64, Message)>>
 }
 
 impl Server {
-    fn new(port: Option<u16>) -> io::Result<Self> {
-        let socket_addr = format!("0.0.0.0:{}", port.unwrap_or(0))
-            .parse::<SocketAddr>()
-            .map_err(|err| {
-                eprintln!("ERROR: Failed to parse listening address: {err}");
-                io::Error::new(io::ErrorKind::InvalidInput, err.to_string())
-            })?;
+    fn tls_config() -> std::io::Result<TlsAcceptor> {
+        let identity = ServerIdentity::load()?; 
 
-        let mut listener = TcpListener::bind(socket_addr)
-            .inspect_err(|err| eprintln!("ERROR: Failed to bind: {err}"))?;
-        let poll = Poll::new()
-            .inspect_err(|err| eprintln!("ERROR: Failed to create poll object: {err}"))?;
+        let config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![identity.certificate], identity.private_key)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("invalid TLS config: {err}")))?;
 
-        let port = listener.local_addr()
-            .inspect_err(|err| eprintln!("ERROR: Failed to get local socket addess of the listener: {err}"))?
-            .port();
+        println!("INFO: server fingerprint:");
+        println!("{}", identity.fingerprint);
 
-        poll.registry()
-            .register(&mut listener, Token(0), Interest::READABLE)
-            .inspect_err(|err| eprintln!("ERROR: Failed to register listener in poll object: {err}"))?;
-
-        Ok(Self {
-            listener,
-            poll,
-            clients: HashMap::new(),
-            messages: Vec::new(),
-            port
-        })
+        Ok(TlsAcceptor::from(Arc::new(config)))
     }
 
-    fn listen(&mut self) -> ! {
-        let mut events = Events::with_capacity(1024);
-        let mut counter = 0;
-
-        println!("INFO: Listening on port {}...", self.port);
-        loop {
-            if let Err(err) = self.poll.poll(&mut events, None) {
-                eprintln!("ERROR: Failed to poll: {err}");
-                continue;
-            }
-            for event in events.iter() {
-                let token = event.token();
-                match token {
-                    Token(0) => loop {
-                        match self.listener.accept() {
-                            Ok((mut stream, addr)) => {
-                                counter += 1;
-                                let client_token = Token(counter);
-
-                                match self.poll.registry().register(&mut stream, client_token, Interest::READABLE | Interest::WRITABLE) {
-                                    Ok(_) => self.client_incoming(stream, addr, client_token),
-                                    Err(err) => eprintln!("ERROR: Failed to register client in the poll object: {err}")
-                                }
-                            }
-                            Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
-                            Err(err) => {
-                                eprintln!("ERROR: Failed to accept client: {err}");
-                                break;
-                            }
-                        }
-                    },
-                    token => {
-                        if event.is_readable() {
-                            self.client_read(token);
-                        }
-                    }
-                }
-            }
+    fn new() -> Self {
+        Self {
+            clients: RwLock::new(HashMap::new()),
+            messages: Mutex::new(Vec::new())
         }
     }
 
-    fn client_incoming(&mut self, stream: TcpStream, addr: SocketAddr, token: Token) {
-        println!("INFO: Incoming connection from {addr}");
-        self.clients.insert(token, Client {
-            stream,
-            name: String::new(),
-            color: ChatColor::Reset,
-            buffer: Vec::new(),
-            handshake_finished: false
-        });
+    async fn get_messages(&self) -> Vec<(i64, Message)> {
+        self.messages.lock().await.clone()
     }
 
-    fn client_broadcast(&mut self, sender_token: &Token, timestamp_secs: i64, msg: String) {
-        if let Some(client) = self.clients.get(sender_token) {
-            let client_name = client.name.clone();
-            if client_name.is_empty() {
-                return;
-            }
+    async fn add_message(&self, timestamp: i64, message: Message) {
+        let mut messages = self.messages.lock().await;
+        messages.push((timestamp, message));
 
-            println!("INFO: ({}) `{}` says: {}", datetime_from_timestamp(timestamp_secs), client_name, msg);
+        let messages_len = messages.len();
 
-            let broadcast_msg = Message::ClientMessage {name: client_name, color: client.color, msg};
-
-            let recipients: Vec<Token> = self.clients
-                .keys()
-                .filter(|&&token| token != *sender_token)
-                .cloned()
-                .collect();
-
-            for other_token in recipients {
-                if let Some(other_client) = self.clients.get_mut(&other_token) {
-                    let _ = send_message(&mut other_client.stream, broadcast_msg.clone(), Some(timestamp_secs));
-                }
-            }
-
-            self.messages.push((timestamp_secs, broadcast_msg));
+        if messages_len > MAX_MESSAGES {
+            messages.drain(..messages_len - MAX_MESSAGES);
         }
     }
 
-    fn server_broadcast(&mut self, msg: Message, timestamp_secs: i64) {
-        for client in self.clients.values_mut() {
-            let _ = send_message(&mut client.stream, msg.clone(), Some(timestamp_secs));
-        }
-        self.messages.push((timestamp_secs, msg));
+    async fn client_disconnect<S: std::fmt::Display + AsRef<str>>(&self, client_id: u64, reason: S) {
+        let client = {
+            let mut clients = self.clients.write().await;
+            match clients.remove(&client_id) {
+                Some(client) => client,
+                None => return
+            }
+        };
+
+        let timestamp = Local::now().timestamp();
+
+        println!("INFO: `{}` disconnected at {} | {}", client.name, datetime_from_timestamp(timestamp), reason);
+
+        let message = Message::ClientDisconnected {
+            name: client.name,
+            color: client.color,
+            reason: reason.to_string()
+        };
+
+        self.broadcast(Some(timestamp), message).await;
     }
 
-    fn client_disconnected(&mut self, token: &Token, reason: &str) {
-        if let Some(mut client) = self.clients.remove(token) {
-            if client.name.is_empty() {
-                match client.stream.peer_addr() {
-                    Ok(addr) => println!("INFO: {addr} disconnected prematurely (reason: {reason})"),
-                    Err(err) => eprintln!("ERROR: Failed to get address of the prematurely disconnected client: {err}")
-                }
-            } else {
-                let timestamp_secs = Local::now().timestamp();
+    async fn client_send_assigned_color(&self, client_id: u64) -> Option<ChatColor> {
+        static DEFAULT_COLORS: &[ChatColor] = &[
+            ChatColor::Red,
+            ChatColor::Green,
+            ChatColor::Yellow,
+            ChatColor::Blue,
+            ChatColor::Magenta,
+            ChatColor::Cyan,
+            ChatColor::LightRed,
+            ChatColor::LightGreen,
+            ChatColor::LightYellow,
+            ChatColor::LightBlue,
+            ChatColor::LightMagenta
+        ];
 
-                let disconn_msg = Message::ClientDisconnected {
-                    name: client.name.clone(),
-                    color: client.color,
-                    reason: reason.to_string()
+        let (tx, color) = {
+            let mut clients = self.clients.write().await;
+            let client = match clients.get_mut(&client_id) {
+                Some(client) => client,
+                None => return None
+            };
+
+            let mut hasher = DefaultHasher::new();
+            client.name.hash(&mut hasher);
+            let hash = hasher.finish();
+            let color_index = hash as usize % DEFAULT_COLORS.len();
+
+            client.color = DEFAULT_COLORS[color_index];
+
+            (client.outgoing_tx.clone(), client.color)
+        };
+
+        let message = Message::ClientAssignedColor { color };
+
+        let _ = tx.send((None, message)).await;
+
+        Some(color)
+    }
+
+    async fn client_connected(&self, client_id: u64, timestamp: i64, client_name: String) {
+        let kick_tx = {
+            let mut clients = self.clients.write().await;
+            if clients.iter().any(|(_, c)| c.name == client_name) {
+                let client = match clients.get(&client_id) {
+                    Some(client) => client,
+                    None => return
                 };
-
-                println!("INFO: `{}` disconnected at {} reason: {}", client.name, datetime_from_timestamp(timestamp_secs), reason);
-
-                self.server_broadcast(disconn_msg, timestamp_secs);
+                Some(client.outgoing_tx.clone())
+            } else {
+                if let Some(client) = clients.get_mut(&client_id) {
+                    client.name = client_name.clone();
+                }
+                None
             }
+        };
 
-            if let Err(err) = self.poll.registry().deregister(&mut client.stream) {
-                eprintln!("ERROR: Failed to deregister client `{}` from the poll object: {}", client.name, err);
-            }
-        }
-    }
+        if let Some(tx) = kick_tx {
+            let message = Message::ClientKicked {
+                name: client_name.clone(),
+                reason: KickReason::NameTaken
+            };
 
-    fn kick_client(&mut self, token: &Token, client_name: String, reason: KickReason) {
-        if let Some(mut client) = self.clients.remove(token) {
-            match client.stream.peer_addr() {
-                Ok(addr) => println!("INFO: {addr} was kicked (reason: {reason})"),
-                Err(err) => eprintln!("ERROR: Failed to get address of the kicked client: {err}")
-            }
+            let _ = tx.send((None, message)).await;
 
-            let _ = send_message(&mut client.stream, Message::ClientKicked {name: client_name, reason}, None);
-
-            if let Err(err) = self.poll.registry().deregister(&mut client.stream) {
-                eprintln!("ERROR: Failed to deregister client `{}` from the poll object: {}", client.name, err);
-            }
-        }
-    }
-
-    fn client_connected(&mut self, token: &Token, timestamp_secs: i64, client_name: String) {
-        if self.clients.iter().any(|(_, c)| { c.name == client_name }) {
-            self.kick_client(token, client_name, KickReason::NameTaken);
             return;
         }
 
-        let mut client_color = ChatColor::Reset;
+        println!("INFO: `{}` connected at {}", client_name, datetime_from_timestamp(timestamp));
+        
+        let color = self.client_send_assigned_color(client_id).await.unwrap_or(ChatColor::Reset);
 
-        if let Some(client) = self.clients.get_mut(token) {
-            client.name = client_name.clone();
-
-            println!("INFO: `{}` connected at {}", client.name, datetime_from_timestamp(timestamp_secs));
-
-            client.send_assigned_color();
-            client_color = client.color;
-
-            for (timestamp, msg) in &self.messages {
-                let _ = send_message(&mut client.stream, msg.clone(), Some(*timestamp));
+        let tx = {
+            let clients = self.clients.read().await;
+        
+            match clients.get(&client_id) {
+                Some(client) => client.outgoing_tx.clone(),
+                None => return
             }
-        }
+        };
 
-        self.server_broadcast(Message::ClientConnected { name: client_name, color: client_color }, timestamp_secs);
-    }
+        let messages = self.get_messages().await;
 
-    fn client_send_message(&mut self, token: &Token, message: Message, timestamp_secs: Option<i64>) -> io::Result<()> {
-        if let Some(client) = self.clients.get_mut(token) {
-            send_message(&mut client.stream, message, timestamp_secs)
-        } else {
-            Err(io::Error::other("client doesnt exist in the hash map"))
-        }
-    }
-
-    fn client_send_list(&mut self, token: &Token) {
-        let clients: Vec<(String, ChatColor)> =
-            self.clients
-                .values()
-                .filter(|other_client| !other_client.name.is_empty())
-                .map(|other_client| (other_client.name.clone(), other_client.color))
-                .collect();
-
-        let _ = self.client_send_message(token, Message::ClientList { clients }, None);
-    }
-
-    fn client_read(&mut self, token: Token) {
-        if self.client_handshake(&token) {
-            self.client_read_messages(&token);
-        }
-    }
-
-    fn client_change_name(&mut self, token: &Token, new_name: String) {
-        if let Some(client) = self.clients.get(token) {
-            if self.clients.iter().any(|(_, other_client)| other_client.name == new_name) {
-                let _ = self.client_send_message(token, Message::NameTaken {old_name: client.name.clone()}, None);
+        for (timestamp, message) in messages {
+            if tx.send((Some(timestamp), message)).await.is_err() {
                 return;
             }
         }
 
-        let mut old_name = String::new();
-
-        if let Some(client) = self.clients.get_mut(token) {
-            old_name = client.name.clone();
-            client.name = new_name.clone();
-            println!("INFO: `{}` changed their name to `{}`", old_name, client.name);
-        }
-
-        let timestamp_secs = Local::now().timestamp();
-
-        self.server_broadcast(Message::ClientChangedName { old_name, new_name }, timestamp_secs);
+        let message = Message::ClientConnected {
+            name: client_name,
+            color 
+        };
+        self.broadcast(Some(timestamp), message).await;
     }
 
-    fn client_change_color(&mut self, token: &Token, new_color: ChatColor) {
-        if let Some(client) = self.clients.get_mut(token) {
+    async fn client_broadcast(&self, client_id: u64, timestamp_secs: i64, msg: String) {
+        let (txs, message, client_name) = {
+            let clients = self.clients.read().await; 
+
+            let client = match clients.get(&client_id) {
+                Some(client) => client,
+                None => return
+            };
+
+            let txs = clients
+                .iter()
+                .filter(|(id, _)| **id != client_id)
+                .map(|(_, client)| client.outgoing_tx.clone())
+                .collect::<Vec<_>>();
+
+            let message = Message::ClientMessage {
+                name: client.name.clone(),
+                color: client.color,
+                msg: msg.clone()
+            };
+
+            (txs, message, client.name.clone())
+        };
+
+        println!("INFO: ({}) `{}` says: {}", datetime_from_timestamp(timestamp_secs), client_name, msg);
+
+        for tx in txs {
+            let _ = tx.send((Some(timestamp_secs), message.clone())).await;
+        }
+
+        self.add_message(timestamp_secs, message).await;
+    }
+
+    async fn send_client_list(&self, client_id: u64) {
+        let (tx, clients) = {
+            let clients = self.clients.read().await;
+            let client = match clients.get(&client_id) {
+                Some(client) => client,
+                None => return
+            };
+            let clients = clients
+                .values()
+                .filter(|c| !c.name.is_empty())
+                .map(|c| (c.name.clone(), c.color))
+                .collect();
+            (client.outgoing_tx.clone(), clients)
+        };
+
+        let _ = tx.send((None, Message::ClientList { clients })).await;
+    }
+
+    async fn client_change_name(&self, client_id: u64, new_name: String) {
+        let message = {
+            let mut clients = self.clients.write().await;
+            if clients.iter().any(|(_, other_client)| other_client.name == new_name) {
+                let client = match clients.get(&client_id) {
+                    Some(client) => client,
+                    None => return
+                };
+                Message::NameTaken { old_name: client.name.clone() }
+            } else {
+                let client = match clients.get_mut(&client_id) {
+                    Some(client) => client,
+                    None => return
+                };
+                let old_name = client.name.clone();
+
+                client.name = new_name.clone();
+                
+                Message::ClientChangedName {
+                    old_name,
+                    new_name
+                }
+            }
+        };
+
+        self.broadcast(None, message).await;
+    }
+
+    async fn client_change_color(&self, client_id: u64, new_color: ChatColor) {
+        let mut clients = self.clients.write().await;
+        if let Some(client) = clients.get_mut(&client_id) {
             client.color = new_color;
         }
     }
 
-    fn client_read_messages(&mut self, token: &Token) {
-        let mut read_ops: u32 = 0;
-        const READS_PER_TICK: u32 = 32;
+    async fn broadcast(&self, timestamp: Option<i64>, msg: Message) {
+        let timestamp = timestamp.unwrap_or(Local::now().timestamp());
 
-        loop {
-            read_ops += 1;
-            if read_ops > READS_PER_TICK {
-                break;
-            }
-            if let Some(client) = self.clients.get_mut(token) {
-                match client.receive_message() {
-                    Ok(timestamp_message) => {
-                        if let Some((timestamp_secs, message)) = timestamp_message {
-                            match message {
-                                Message::ClientConnected { name, .. } => self.client_connected(token, timestamp_secs, name),
-                                Message::ClientMessage { msg, .. } => self.client_broadcast(token, timestamp_secs, msg),
-                                Message::GetClientList => self.client_send_list(token),
-                                Message::ClientWantNewName { new_name } => self.client_change_name(token, new_name),
-                                Message::ClientWantNewColor { new_color } => self.client_change_color(token, new_color),
-                                _ => {}
-                            };
-                        }
-                    }
-                    Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
-                    Err(err) => {
-                        let error_message = err.to_string();
-                        let mut reason = error_message.as_str();
-                        match err.kind() {
-                            io::ErrorKind::ConnectionReset => reason = "connection closed",
-                            io::ErrorKind::InvalidData => reason = "invalid client",
-                            _ => {}
-                        };
-                        self.client_disconnected(token, reason);
-                        break;
-                    }
-                };
-            }
-        }
-    }
-
-    fn client_handshake(&mut self, token: &Token) -> bool {
-        let client = match self.clients.get_mut(token) {
-            Some(c) => c,
-            None => return false,
+        let txs: Vec<_> = {
+            let clients = self.clients.read().await;
+            clients
+                .values()
+                .map(|c| c.outgoing_tx.clone())
+                .collect()
         };
 
-        if client.handshake_finished {
-            return true;
+        self.add_message(timestamp, msg.clone()).await;
+
+        for tx in txs {
+            let _ = tx.send((Some(timestamp), msg.clone())).await;
         }
+    }
+}
 
-        const EXPECTED_MAGIC: &[u8] = b"ChaTTY\0\0";
+async fn handle_client<S>(server: Arc<Server>, client_id: u64, mut stream: S, addr: SocketAddr) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static
+{
+    if let Err(err) = init_handshake(&mut stream).await {
+        server.client_disconnect(client_id, err.to_string()).await;
+        return Ok(());
+    }
 
+    let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<(Option<i64>, Message)>(64);
+
+    server.clients
+        .write()
+        .await
+        .insert(client_id, Client::new(addr, outgoing_tx));
+
+    let (mut reader, mut writer) = tokio::io::split(stream);
+
+    let server_reader = server.clone();
+    let reader_task = tokio::spawn(async move {
         loop {
-            if client.buffer.len() >= 8 {
+            match receive_message(&mut reader).await {
+                Ok((timestamp, message)) => {
+                    match message {
+                        Message::ClientConnected { name, .. } => server_reader.client_connected(client_id, timestamp, name).await,
+                        Message::ClientMessage { msg, .. } => server_reader.client_broadcast(client_id, timestamp, msg).await,
+                        Message::GetClientList => server_reader.send_client_list(client_id).await,
+                        Message::ClientWantNewName { new_name } => server_reader.client_change_name(client_id, new_name).await,
+                        Message::ClientWantNewColor { new_color } => server_reader.client_change_color(client_id, new_color).await,
+                        _ => {}
+                    };
+                }
+                Err(err) if matches!(err.kind(), std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe) => {
+                    server_reader.client_disconnect(client_id, "connection closed").await;
+                    break;
+                }
+                Err(err) => {
+                    server_reader.client_disconnect(client_id, err.to_string()).await;
+                    break;
+                }
+            }    
+        }
+    });
+    
+    let server_writer = server.clone();
+    let writer_task = tokio::spawn(async move {
+        while let Some((timestamp, message)) = outgoing_rx.recv().await {
+            if let Err(err) = send_message(&mut writer, &message, timestamp).await {
+                let reason = match err.kind() {
+                    std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe => String::from("connection closed"),
+                    _ => err.to_string()
+                };
+                server_writer.client_disconnect(client_id, reason).await;
                 break;
             }
-
-            let mut temp = [0u8; 8];
-            match client.stream.read(&mut temp) {
-                Ok(0) => {
-                    self.client_disconnected(token, "connection closed");
-                    return false;
-                }
-                Ok(n) => client.buffer.extend_from_slice(&temp[..n]),
-                Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => return false,
-                Err(err) => {
-                    self.client_disconnected(token, &err.to_string());
-                    return false;
-                }
+            if let Message::ClientKicked { reason, .. } = message {
+                server_writer.client_disconnect(client_id, format!("kicked: {reason}")).await;
+                break;
             }
         }
+    });
 
-        if client.buffer[..8] != *EXPECTED_MAGIC {
-            self.client_disconnected(token, "invalid client");
-            return false;
-        }
+    let _ = tokio::join!(reader_task, writer_task); 
 
-        client.buffer.drain(..8);
-
-        if let Err(err) = client.stream.write_all(EXPECTED_MAGIC) {
-            self.client_disconnected(token, &err.to_string());
-            return false;
-        }
-
-        client.handshake_finished = true;
-        true
-    }
+    Ok(())
 }
 
 #[derive(Parser)]
 #[command(version = CHATTY_VERSION)]
 struct Args {
     /// The port that the server will bind to
-    #[arg(long)]
-    port: Option<u16>
+    #[arg(long, default_value_t = 0)]
+    port: u16
 }
 
-fn main() -> io::Result<()> {
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     let args = Args::parse();
+
     println!("INFO: ChaTTY server {CHATTY_VERSION}");
-    let mut server = Server::new(args.port)?;
-    server.listen();
+
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", args.port))
+        .await
+        .inspect_err(|err| eprintln!("ERROR: failed to bind: {err}"))?; 
+    let tls_acceptor = Server::tls_config()
+        .inspect_err(|err| eprintln!("ERROR: TLS config failed: {err}"))?;
+
+    println!("INFO: listening on port {}...", listener.local_addr()?.port());
+
+    let server = Arc::new(Server::new());
+    let mut client_id = 0;
+
+    loop {
+        match listener.accept().await {
+            Ok((stream, addr)) => {
+                client_id += 1;
+
+                let server = server.clone();
+                let tls_acceptor = tls_acceptor.clone();
+
+                let join_handle = tokio::spawn(async move {
+                    let tls_stream = tls_acceptor.accept(stream).await?;
+                    handle_client(server, client_id, tls_stream, addr).await
+                });
+
+                if let Err(err) = join_handle.await {
+                    eprintln!("ERROR: {addr}: {err}");
+                }
+            }
+            Err(err) => eprintln!("ERROR: failed to accept new client: {err}")
+        }
+    }
 }

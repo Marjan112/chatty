@@ -3,6 +3,7 @@ use ratatui::text::Line;
 
 use crate::ChatColor;
 use crate::ActivePopup;
+use crate::MAX_MESSAGES;
 
 #[derive(Default)]
 pub struct Shared {
@@ -13,4 +14,17 @@ pub struct Shared {
     pub connection: AtomicBool,
     pub popup: Mutex<Option<ActivePopup>>,
     pub clients: Mutex<Vec<(String, ChatColor)>>
+}
+
+impl Shared {
+    pub fn add_message(&self, line: Line<'static>) {
+        let mut messages = self.messages.lock().unwrap();
+        messages.push(line);
+
+        let messages_len = messages.len();
+
+        if messages_len > MAX_MESSAGES {
+            messages.drain(..messages_len - MAX_MESSAGES);
+        }
+    }
 }

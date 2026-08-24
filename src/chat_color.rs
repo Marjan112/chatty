@@ -2,7 +2,7 @@ use serde::{Serialize, Deserialize};
 use ratatui::style::Color;
 use std::fmt;
 
-#[derive(Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum ChatColor {
     // The default colors
     #[default]

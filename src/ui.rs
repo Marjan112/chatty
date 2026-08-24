@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Layout, HorizontalAlignment, Constraint, Rect, Flex, Margin},
-    widgets::{Block, Borders, Paragraph, Wrap, Scrollbar, ScrollbarState, ScrollbarOrientation, Widget, Clear, List, ListState},
+    widgets::{Block, Borders, Paragraph, Wrap, Scrollbar, ScrollbarState, Widget, Clear, List, ListState},
     style::{Style, Stylize, Color},
     text::{Span, Line, Text},
     buffer::Buffer,
@@ -9,7 +9,7 @@ use ratatui::{
 use ratatui_textarea::{DataCursor, TextArea};
 
 use crate::Shared;
-use crate::env::CHATTY_VERSION;
+use crate::Fingerprint;
 
 #[derive(Default)]
 pub struct Popup<'a> {
@@ -19,7 +19,7 @@ pub struct Popup<'a> {
     border_style: Style,
     title_style: Style,
     style: Style,
-    title_alignment: HorizontalAlignment,
+    title_alignment: HorizontalAlignment
 }
 
 impl<'a> Popup<'a> {
@@ -65,10 +65,10 @@ impl<'a> Popup<'a> {
     }
 
     fn render_centered(self, area: Rect, buf: &mut Buffer) {
-        let [vertical] = Layout::vertical([Constraint::Max(10)])
+        let [vertical] = Layout::vertical([Constraint::Max(12)])
             .flex(Flex::Center)
             .areas(area);
-        let [horizontal] = Layout::horizontal([Constraint::Max(40)])
+        let [horizontal] = Layout::horizontal([Constraint::Max(71)])
             .flex(Flex::Center)
             .areas(vertical);
 
@@ -94,9 +94,15 @@ impl Widget for Popup<'_> {
     }
 }
 
+#[derive(Clone)]
 pub enum ActivePopup {
     Info(String),
-    Error(String)
+    Error(String),
+    VerifyConnect {
+        host: String,
+        fingerprint: Fingerprint,
+        message: String
+    }
 }
 
 impl ActivePopup {
@@ -122,6 +128,20 @@ impl ActivePopup {
                     .title_bottom(vec![" <ESC> ".light_red(), "dismiss ".dark_gray()])
                     .title_style(Style::default().light_red())
                     .border_style(Style::default().light_red())
+                    .render_centered(area, frame.buffer_mut()),
+            ActivePopup::VerifyConnect { message, .. } =>
+                Popup::default()
+                    .content(message.as_str())
+                    .style(Style::default())
+                    .title_alignment(HorizontalAlignment::Center)
+                    .title(" Verification ")
+                    .title_bottom(vec![
+                        " <Y> ".green(), "yes ".dark_gray(),
+                        "|".reset(),
+                        " <N> ".green(), "no ".dark_gray()
+                    ])
+                    .title_style(Style::default().green())
+                    .border_style(Style::default().green())
                     .render_centered(area, frame.buffer_mut())
         }
     }
@@ -172,7 +192,7 @@ impl ScrollState {
     }
 
     fn update_from_paragraph(&mut self, paragraph: &Paragraph<'_>, area: Rect) {
-        let line_count = paragraph.line_count(area.width - 2);
+        let line_count = paragraph.line_count(area.width.saturating_sub(2));
         let visible_lines = area.height as usize;
         self.max = line_count.saturating_sub(visible_lines);
 
@@ -200,11 +220,11 @@ impl ScrollState {
     }
 
     fn scroll_up(&mut self) {
-        self.scroll_up_by(1);
+        self.scroll_up_by(3);
     }
 
     fn scroll_down(&mut self) {
-        self.scroll_down_by(1);
+        self.scroll_down_by(3);
     }
 
     fn page_up(&mut self, height: u16) {
@@ -294,7 +314,7 @@ impl Prompt {
 
     pub fn history_next(&mut self) {
         match self.history_index {
-            None => return,
+            None => (),
             Some(index) if index < self.history.len() - 1 => {
                 self.history_index = Some(index + 1);
                 self.load_history();
@@ -345,12 +365,12 @@ impl Ui {
             .flex(Flex::Center)
             .areas(frame.area());
 
-        let [horizontal] = Layout::horizontal([Constraint::Percentage(40)])
+        let [horizontal] = Layout::horizontal([Constraint::Max(40)])
             .flex(Flex::Center)
             .areas(vertical);
 
         let container = Block::bordered()
-            .title(format!(" ChaTTY ({CHATTY_VERSION}) - Connect "))
+            .title(" ChaTTY - Connect ")
             .title_alignment(HorizontalAlignment::Center)
             .title_bottom(vec![
                 " <TAB> ".yellow(),
@@ -439,14 +459,12 @@ impl Ui {
             Constraint::Min(3),
             Constraint::Length(3)
         ])
-        .margin(1)
         .areas(frame.area());
 
         let [chat_window_area, client_list_area] = Layout::horizontal([
-            Constraint::Min(3),
-            Constraint::Length(15)
+            Constraint::Min(50),
+            Constraint::Length(25)
         ])
-        .spacing(1)
         .areas(top_area);
 
         self.chat_window_area = chat_window_area;
@@ -458,23 +476,17 @@ impl Ui {
     }
 
     fn draw_client_list(&mut self, frame: &mut Frame, shared: &Shared) {
-        let lock = shared.clients.lock().unwrap();
-        let mut clients = Vec::with_capacity(lock.len());
+        let clients_lock = shared.clients.lock().unwrap();
+        let clients: Vec<_> = clients_lock
+            .iter()
+            .map(|(name, color)| Line::styled(name, Style::default().fg((*color).into())))
+            .collect();
 
         let block = Block::bordered()
-            .title(format!(" Clients ({}) ", lock.len()).yellow())
+            .title(format!(" Clients ({}) ", clients.len()).yellow())
             .title_alignment(HorizontalAlignment::Center);
 
-        for (name, color) in lock.iter() {
-            let line = Line::styled(
-                format!("• {name}"),
-                Style::default().fg((*color).into())
-            );
-            clients.push(line);
-        }
-
         let list = Paragraph::new(clients)
-            .wrap(Wrap { trim: true })
             .block(block)
             .scroll((self.client_list_scroll.scroll as u16, 0));
 
@@ -482,8 +494,11 @@ impl Ui {
 
         frame.render_widget(list, self.client_list_area);
         frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight),
-            self.client_list_area,
+            Scrollbar::default()
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(None),
+            self.client_list_area.inner(Margin::new(0, 1)),
             &mut self.client_list_scroll.bar);
     }
 
@@ -503,8 +518,11 @@ impl Ui {
 
         frame.render_widget(chat, self.chat_window_area);
         frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight),
-            self.chat_window_area,
+            Scrollbar::default()
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(None),
+            self.chat_window_area.inner(Margin::new(0, 1)),
             &mut self.chat_scroll.bar,
         );
     }
@@ -607,5 +625,9 @@ impl Ui {
 
     pub fn chat_page_down(&mut self) {
         self.chat_scroll.page_down(self.chat_window_area.height);
+    }
+
+    pub fn chat_auto_scroll(&mut self) {
+        self.chat_scroll.auto = true;
     }
 }

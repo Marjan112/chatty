@@ -187,7 +187,7 @@ const COMMANDS: &[Command] = &[
                                 *current_color = new_color_parsed;
                                 app.shared.add_message(Line::from(vec![
                                     Span::from("color: changed your color to "),
-                                    Span::styled(current_color.to_string(), Style::default().fg((*current_color).into()))
+                                    Span::styled(current_color.to_string(), Style::default().fg(*current_color))
                                 ]));
                             }
                             Err(err) => app.shared.add_message(format!("color: failed to change your color: {err}").into())
@@ -731,15 +731,13 @@ impl App {
                                 .lock()
                                 .unwrap()
                                 .to_owned();
-                            let color: Color = self.shared.color
+                            let color = self.shared.color
                                 .lock()
-                                .unwrap()
-                                .to_owned()
-                                .into();
+                                .unwrap();
                             self.shared.add_message(Line::from(vec![
                                 datetime.into(),
                                 " ".into(),
-                                Span::styled(name, Style::default().fg(color)),
+                                Span::styled(name, Style::default().fg(*color)),
                                 format!(": {input}").into()
                             ]));
                         }

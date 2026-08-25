@@ -48,8 +48,12 @@ fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Share
                 .map(|(name, color)| (name, color.parse().unwrap_or_default()))
                 .collect();
         }
-        Message::ClientKicked {name, reason}
-        if name == *shared.name.lock().unwrap() => *shared.popup.lock().unwrap() = Some(ActivePopup::Info(format!("You have been kicked (reason: {reason})"))),
+        Message::ClientKicked {name, reason} if name == *shared.name.lock().unwrap() => {
+            *shared.popup.lock().unwrap() = Some(ActivePopup::Info(format!("You have been kicked (reason: {reason})")));
+            shared.connection.store(false, Ordering::Relaxed);
+            shared.messages.lock().unwrap().clear();
+            shared.clients.lock().unwrap().clear();
+        }
         Message::ClientChangedName {old_name, new_name} => shared.add_message(format!("{datetime} {old_name} changed their name to {new_name}").into()),
         Message::ClientAssignedColor { color } => *shared.color.lock().unwrap() = color.parse().unwrap_or_default(),
         Message::NameTaken { old_name } => {

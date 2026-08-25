@@ -479,7 +479,7 @@ impl Ui {
         let clients_lock = shared.clients.lock().unwrap();
         let clients: Vec<_> = clients_lock
             .iter()
-            .map(|(name, color)| Line::styled(name, Style::default().fg((*color).into())))
+            .map(|(name, color)| Line::styled(name, Style::default().fg(*color)))
             .collect();
 
         let block = Block::bordered()
@@ -529,10 +529,10 @@ impl Ui {
 
     fn draw_chat_prompt(&mut self, frame: &mut Frame, chat_prompt_area: Rect, shared: &Shared) {
         let name = shared.name.lock().unwrap().to_owned();
-        let color: Color = shared.color.lock().unwrap().to_owned().into();
+        let color = shared.color.lock().unwrap();
 
         let block = Block::bordered()
-            .title(vec![" You (".into(), Span::styled(name, Style::default().fg(color)), "): ".into()])
+            .title(vec![" You (".into(), Span::styled(name, Style::default().fg(*color)), "): ".into()])
             .yellow();
 
         self.chat_prompt.textarea.set_block(block);

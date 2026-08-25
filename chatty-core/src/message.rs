@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::{io, fmt};
 use serde::{Serialize, Deserialize};
 use tokio::io::{AsyncReadExt, AsyncRead, AsyncWriteExt, AsyncWrite};

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use sha2::{Sha256, Digest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]

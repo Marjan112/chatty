@@ -8,11 +8,12 @@ use ratatui::{
 };
 use tokio::io::AsyncRead;
 
+use chatty_core::message::*;
+use chatty_core::utils::datetime_from_timestamp;
+
 use crate::{
-    message::*,
     shared::Shared,
     ui::ActivePopup,
-    utils::datetime_from_timestamp,
     chat_error
 };
 
@@ -24,28 +25,37 @@ fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Share
             shared.add_message(Line::from(vec![
                 datetime.into(),
                 Span::from(" "),
-                Span::styled(name, Style::default().fg(color.into())),
+                Span::styled(name, Style::default().fg(color.parse().unwrap_or_default())),
                 Span::from(" connected"),
             ])),
         Message::ClientDisconnected {name, color, reason} =>
             shared.add_message(Line::from(vec![
                 datetime.into(),
                 Span::from(" "),
-                Span::styled(name, Style::default().fg(color.into())),
+                Span::styled(name, Style::default().fg(color.parse().unwrap_or_default())),
                 format!(" disconnected (reason: {reason})").into()
             ])),
         Message::ClientMessage {name, color, msg} =>
             shared.add_message(Line::from(vec![
                 datetime.into(),
                 Span::from(" "),
-                Span::styled(name, Style::default().fg(color.into())),
+                Span::styled(name, Style::default().fg(color.parse().unwrap_or_default())),
                 format!(": {msg}").into()
             ])),
-        Message::ClientList { clients } => *shared.clients.lock().unwrap() = clients,
-        Message::ClientKicked {name, reason}
-        if name == *shared.name.lock().unwrap() => *shared.popup.lock().unwrap() = Some(ActivePopup::Info(format!("You have been kicked (reason: {reason})"))),
+        Message::ClientList { clients } => {
+            *shared.clients.lock().unwrap() = clients
+                .into_iter()
+                .map(|(name, color)| (name, color.parse().unwrap_or_default()))
+                .collect();
+        }
+        Message::ClientKicked {name, reason} if name == *shared.name.lock().unwrap() => {
+            *shared.popup.lock().unwrap() = Some(ActivePopup::Info(format!("You have been kicked (reason: {reason})")));
+            shared.connection.store(false, Ordering::Relaxed);
+            shared.messages.lock().unwrap().clear();
+            shared.clients.lock().unwrap().clear();
+        }
         Message::ClientChangedName {old_name, new_name} => shared.add_message(format!("{datetime} {old_name} changed their name to {new_name}").into()),
-        Message::ClientAssignedColor { color } => *shared.color.lock().unwrap() = color,
+        Message::ClientAssignedColor { color } => *shared.color.lock().unwrap() = color.parse().unwrap_or_default(),
         Message::NameTaken { old_name } => {
             shared.add_message("name: new name that you requested is already taken by someone else".into());
             *shared.name.lock().unwrap() = old_name;

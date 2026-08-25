@@ -34,7 +34,7 @@ jobs:
         shell: pwsh
         run: |
           $ZipName = "chatty-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip"
-          Compress-Archive -Path "target/release/chatty_client.exe", "target/release/chatty_server.exe" -DestinationPath $ZipName
+          Compress-Archive -Path "target/release/chatty-client.exe", "target/release/chatty-server.exe" -DestinationPath $ZipName
 
       - name: Release (create + upload)
         if: startsWith(github.ref, 'refs/tags/')

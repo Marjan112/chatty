@@ -171,6 +171,11 @@ impl Server {
             }
         };
 
+        if client.name.is_empty() {
+            println!("INFO: disconnected unauthenticated client {} | {}", client.addr, reason);
+            return;
+        }
+
         let timestamp = Local::now().timestamp();
 
         println!("INFO: `{}` disconnected at {} | {}", client.name, datetime_from_timestamp(timestamp), reason);
@@ -247,11 +252,6 @@ impl Server {
             };
 
             let _ = tx.send((None, message)).await;
-
-            self.clients
-                .write()
-                .await
-                .remove(&client_id);
 
             return;
         }
@@ -483,23 +483,16 @@ async fn main() -> std::io::Result<()> {
     let mut client_id = 0;
 
     loop {
-        match listener.accept().await {
-            Ok((stream, addr)) => {
-                client_id += 1;
+        if let Ok((stream, addr)) = listener.accept().await {
+            client_id += 1;
 
-                let server = server.clone();
-                let tls_acceptor = tls_acceptor.clone();
+            let server = server.clone();
+            let tls_acceptor = tls_acceptor.clone();
 
-                let join_handle = tokio::spawn(async move {
-                    let tls_stream = tls_acceptor.accept(stream).await?;
-                    handle_client(server, client_id, tls_stream, addr).await
-                });
-
-                if let Err(err) = join_handle.await {
-                    eprintln!("ERROR: {addr}: {err}");
-                }
-            }
-            Err(err) => eprintln!("ERROR: failed to accept new client: {err}")
+            tokio::spawn(async move {
+                let tls_stream = tls_acceptor.accept(stream).await?;
+                handle_client(server, client_id, tls_stream, addr).await
+            });
         }
     }
 }

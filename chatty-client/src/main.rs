@@ -27,7 +27,7 @@ use ratatui::{
             EnableMouseCapture, DisableMouseCapture
         }
     },
-    style::{Color, Style},
+    style::{Color, Style, Stylize},
     text::{Line, Span},
     DefaultTerminal,
 };
@@ -47,14 +47,10 @@ use tokio_rustls::{
     }
 };
 
-mod fingerprint;
-use fingerprint::*;
-
-mod chat_color;
-use chat_color::*;
-
-mod message;
-use message::*;
+use chatty_core::fingerprint::*;
+use chatty_core::message::*;
+use chatty_core::env::*;
+use chatty_core::utils::*;
 
 mod receiver;
 use receiver::*;
@@ -62,15 +58,11 @@ use receiver::*;
 mod shared;
 use shared::*;
 
-mod env;
-
 mod ui;
 use ui::*;
 
-mod utils;
-use utils::*;
-
-use crate::env::CHATTY_VERSION;
+mod macros;
+use macros::chat_error;
 
 fn exit_app(app: &mut App, _: &str) {
     app.shared.exit.store(true, Ordering::Relaxed);
@@ -183,18 +175,16 @@ const COMMANDS: &[Command] = &[
 
             match new_color.parse::<Color>() {
                 Ok(new_color_parsed) => {
-                    let new_chat_color: ChatColor = new_color_parsed.into();
-
-                    if new_chat_color == *app.shared.color.lock().unwrap() {
+                    if new_color_parsed == *app.shared.color.lock().unwrap() {
                         app.shared.add_message("color: you already have the color that you requested".into());
                         return;
                     }
 
                     if let Some(writer) = &mut app.writer {
-                        match send_message(writer, &Message::ClientWantNewColor { new_color: new_chat_color }, None).await {
+                        match send_message(writer, &Message::ClientWantNewColor { new_color: new_color.to_string() }, None).await {
                             Ok(_) => {
                                 let mut current_color = app.shared.color.lock().unwrap(); 
-                                *current_color = new_chat_color;
+                                *current_color = new_color_parsed;
                                 app.shared.add_message(Line::from(vec![
                                     Span::from("color: changed your color to "),
                                     Span::styled(current_color.to_string(), Style::default().fg((*current_color).into()))
@@ -238,6 +228,31 @@ const COMMANDS: &[Command] = &[
         })
     }
 ];
+
+pub fn greet_message() -> Vec<Line<'static>> {
+    vec![
+        Line::from(vec![
+            "ChaTTY ".yellow(),
+            "client ".into(),
+            CHATTY_VERSION.yellow()
+        ]),
+        Line::from(vec![
+            "Type and press ".into(),
+            "ENTER".yellow(),
+            " to send".into()
+        ]),
+        Line::from(vec![
+            "Type ".into(),
+            "/help".yellow(),
+            " for help".into()
+        ]),
+        Line::from(vec![
+            "Press ".into(),
+            "ESC".yellow(),
+            " to exit".into()
+        ])
+    ]
+}
 
 async fn init_handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> io::Result<()> {
     stream.write_all(b"ChaTTY\0\0").await?;
@@ -492,7 +507,7 @@ async fn create_tls_stream(known_hosts: &KnownHosts, host: &str, port: &str) -> 
     let server_name = ServerName::try_from(host.to_string())
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.to_string()))?;
 
-    let tls_stream = connector.connect(server_name, raw_tcp).await?;
+    let tls_stream = tokio::time::timeout(Duration::from_secs(5), connector.connect(server_name, raw_tcp)).await??;
 
     Ok((tls_stream, verifier))
 }
@@ -529,7 +544,7 @@ impl App {
             &mut writer,
             &Message::ClientConnected {
                 name: name.clone(),
-                color: ChatColor::Reset
+                color: "reset".into()
             },
             None
         ).await?;
@@ -703,7 +718,7 @@ impl App {
 
                     let message = Message::ClientMessage {
                         name: String::new(),
-                        color: ChatColor::Reset,
+                        color: "reset".into(),
                         msg: input.clone(),
                     };
 

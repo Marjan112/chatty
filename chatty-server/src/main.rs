@@ -21,25 +21,15 @@ use rcgen::generate_simple_self_signed;
 use chrono::Local;
 use clap::Parser;
 
-mod fingerprint;
-use fingerprint::*;
-
-mod chat_color;
-use chat_color::*;
-
-mod message;
-use message::{Message, KickReason, send_message, receive_message};
-
-mod utils;
-use utils::{datetime_from_timestamp, MAX_MESSAGES};
-
-mod env;
-use crate::env::CHATTY_VERSION;
+use chatty_core::fingerprint::*;
+use chatty_core::message::{Message, KickReason, send_message, receive_message};
+use chatty_core::utils::{datetime_from_timestamp, MAX_MESSAGES};
+use chatty_core::env::CHATTY_VERSION;
 
 struct Client {
     addr: SocketAddr,
     name: String,
-    color: ChatColor,
+    color: String,
     outgoing_tx: Sender<(Option<i64>, Message)>
 }
 
@@ -48,7 +38,7 @@ impl Client {
         Self {
             addr,
             name: String::new(),
-            color: ChatColor::Reset,
+            color: "reset".into(),
             outgoing_tx
         }
     }
@@ -194,19 +184,19 @@ impl Server {
         self.broadcast(Some(timestamp), message).await;
     }
 
-    async fn client_send_assigned_color(&self, client_id: u64) -> Option<ChatColor> {
-        static DEFAULT_COLORS: &[ChatColor] = &[
-            ChatColor::Red,
-            ChatColor::Green,
-            ChatColor::Yellow,
-            ChatColor::Blue,
-            ChatColor::Magenta,
-            ChatColor::Cyan,
-            ChatColor::LightRed,
-            ChatColor::LightGreen,
-            ChatColor::LightYellow,
-            ChatColor::LightBlue,
-            ChatColor::LightMagenta
+    async fn client_send_assigned_color(&self, client_id: u64) -> Option<String> {
+        static DEFAULT_COLORS: &[&str] = &[
+            "red",
+            "green",
+            "yellow",
+            "blue",
+            "magenta",
+            "cyan",
+            "lightred",
+            "lightgreen",
+            "lightyellow",
+            "lightblue",
+            "lightmagenta"
         ];
 
         let (tx, color) = {
@@ -221,12 +211,12 @@ impl Server {
             let hash = hasher.finish();
             let color_index = hash as usize % DEFAULT_COLORS.len();
 
-            client.color = DEFAULT_COLORS[color_index];
+            client.color = DEFAULT_COLORS[color_index].to_string();
 
-            (client.outgoing_tx.clone(), client.color)
+            (client.outgoing_tx.clone(), client.color.clone())
         };
 
-        let message = Message::ClientAssignedColor { color };
+        let message = Message::ClientAssignedColor { color: color.clone() };
 
         let _ = tx.send((None, message)).await;
 
@@ -258,12 +248,17 @@ impl Server {
 
             let _ = tx.send((None, message)).await;
 
+            self.clients
+                .write()
+                .await
+                .remove(&client_id);
+
             return;
         }
 
         println!("INFO: `{}` connected at {}", client_name, datetime_from_timestamp(timestamp));
         
-        let color = self.client_send_assigned_color(client_id).await.unwrap_or(ChatColor::Reset);
+        let color = self.client_send_assigned_color(client_id).await.unwrap_or("reset".into());
 
         let tx = {
             let clients = self.clients.read().await;
@@ -306,7 +301,7 @@ impl Server {
 
             let message = Message::ClientMessage {
                 name: client.name.clone(),
-                color: client.color,
+                color: client.color.clone(),
                 msg: msg.clone()
             };
 
@@ -332,7 +327,7 @@ impl Server {
             let clients = clients
                 .values()
                 .filter(|c| !c.name.is_empty())
-                .map(|c| (c.name.clone(), c.color))
+                .map(|c| (c.name.clone(), c.color.clone()))
                 .collect();
             (client.outgoing_tx.clone(), clients)
         };
@@ -368,7 +363,7 @@ impl Server {
         self.broadcast(None, message).await;
     }
 
-    async fn client_change_color(&self, client_id: u64, new_color: ChatColor) {
+    async fn client_change_color(&self, client_id: u64, new_color: String) {
         let mut clients = self.clients.write().await;
         if let Some(client) = clients.get_mut(&client_id) {
             client.color = new_color;

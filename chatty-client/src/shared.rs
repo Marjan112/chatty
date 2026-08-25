@@ -1,7 +1,6 @@
 use std::sync::{Mutex, atomic::AtomicBool};
-use ratatui::text::Line;
+use ratatui::{text::Line, style::Color};
 
-use crate::ChatColor;
 use crate::ActivePopup;
 use crate::MAX_MESSAGES;
 
@@ -9,11 +8,11 @@ use crate::MAX_MESSAGES;
 pub struct Shared {
     pub messages: Mutex<Vec<Line<'static>>>,
     pub name: Mutex<String>,
-    pub color: Mutex<ChatColor>,
+    pub color: Mutex<Color>,
     pub exit: AtomicBool,
     pub connection: AtomicBool,
     pub popup: Mutex<Option<ActivePopup>>,
-    pub clients: Mutex<Vec<(String, ChatColor)>>
+    pub clients: Mutex<Vec<(String, Color)>>
 }
 
 impl Shared {

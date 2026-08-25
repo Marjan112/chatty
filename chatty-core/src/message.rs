@@ -4,8 +4,6 @@ use std::{io, fmt};
 use serde::{Serialize, Deserialize};
 use tokio::io::{AsyncReadExt, AsyncRead, AsyncWriteExt, AsyncWrite};
 
-use crate::ChatColor;
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum KickReason {
     NameTaken
@@ -25,21 +23,21 @@ impl fmt::Display for KickReason {
 pub enum Message {
     ClientConnected {
         name: String,
-        color: ChatColor
+        color: String
     },
     ClientDisconnected {
         name: String,
-        color: ChatColor,
+        color: String,
         reason: String
     },
     ClientMessage {
         name: String,
-        color: ChatColor,
+        color: String,
         msg: String
     },
     GetClientList,
     ClientList {
-        clients: Vec<(String, ChatColor)>
+        clients: Vec<(String, String)>
     },
     ClientKicked {
         name: String,
@@ -53,10 +51,10 @@ pub enum Message {
         new_name: String
     },
     ClientWantNewColor {
-        new_color: ChatColor
+        new_color: String
     },
     ClientAssignedColor {
-        color: ChatColor
+        color: String
     },
     NameTaken {
         old_name: String

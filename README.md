@@ -15,13 +15,13 @@ https://github.com/user-attachments/assets/e77a01c6-5a09-4b68-b321-07c9cfd29a5f
 ### Server
 
 ```sh
-cargo run --bin chatty_server
+cargo run --bin chatty-server
 ```
 
 ### Client
 
 ```sh
-cargo run --bin chatty_client
+cargo run --bin chatty-client
 ```
 
 ## License

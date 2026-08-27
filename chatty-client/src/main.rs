@@ -315,6 +315,27 @@ fn spawn_event_signaler(tx: std::sync::mpsc::Sender<Event>) {
     });
 }
 
+#[cfg(unix)]
+async fn wait_for_close_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut close_signal = signal(SignalKind::hangup()).unwrap();
+    close_signal.recv().await;
+}
+
+#[cfg(windows)]
+async fn wait_for_close_signal() {
+    use tokio::signal::windows::ctrl_close;
+    let mut close_signal = ctrl_close().unwrap();
+    close_signal.recv().await;
+}
+
+fn spawn_close_signaler(shared: Arc<Shared>)  {
+    tokio::spawn(async move {
+        wait_for_close_signal().await;
+        shared.exit.store(true, Ordering::Relaxed);
+    });
+}
+
 #[derive(Debug)]
 struct TofuVerifier { 
     received_key_fingerprint: Arc<Mutex<Option<Fingerprint>>>,
@@ -844,7 +865,9 @@ impl App {
         let mut get_client_list_timer = Instant::now();
         let (event_tx, event_rx) = std::sync::mpsc::channel();
 
+        // TODO: would it be better to use EventStream?
         spawn_event_signaler(event_tx);
+        spawn_close_signaler(self.shared.clone()); 
 
         while !self.shared.exit.load(Ordering::Relaxed) {
             self.handle_events(&event_rx).await;
@@ -878,7 +901,6 @@ impl App {
 
         let _ = restore_terminal();
 
-        // TODO: this won't be run if user clicks the close button on their terminal
         self.known_hosts
             .save()
             .inspect_err(|err| eprintln!("ERROR: Failed to save known hosts to database: {err}"))

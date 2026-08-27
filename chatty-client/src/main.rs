@@ -397,7 +397,7 @@ impl ServerCertVerifier for TofuVerifier {
 
 #[derive(Default)]
 struct KnownHosts {
-    hosts: HashMap<String, Fingerprint>
+    hosts: HashMap<(String, String), Fingerprint>
 }
 
 impl KnownHosts {
@@ -412,6 +412,8 @@ impl KnownHosts {
             return Ok(Self::default());
         }
 
+        let known_hosts_display = known_hosts_path.display();
+
         let mut hosts = HashMap::new();
 
         let contents = fs::read_to_string(&known_hosts_path)?;
@@ -419,31 +421,36 @@ impl KnownHosts {
             let mut parts = line.split_whitespace();
             let line_number = i + 1;
 
-            let host = parts
+            let (hostname, port) = parts
                 .next()
                 .ok_or_else(|| io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("{}: missing host on line {}", known_hosts_path.display(), line_number)
+                    format!("{known_hosts_display}:{line_number}: missing hostname:port")
+                ))?
+                .split_once(':')
+                .ok_or_else(|| io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{known_hosts_display}:{line_number}: missing port")
                 ))?;
 
             let fingerprint = parts
                 .next()
                 .ok_or_else(|| io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("{}: missing fingerprint on line {}", known_hosts_path.display(), line_number)
+                    format!("{known_hosts_display}:{line_number}: missing fingerprint")
                 ))?;
 
             let fingerprint = fingerprint
                 .strip_prefix("SHA256:")
                 .ok_or_else(|| io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("{}:{}: fingerprint must begin with `SHA256:` prefix", known_hosts_path.display(), line_number)
+                    format!("{known_hosts_display}:{line_number}: fingerprint must begin with `SHA256:` prefix")
                 ))?;
 
             if fingerprint.len() != 64 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("{}:{}: fingerprint must contain 64 hexadecimal characters", known_hosts_path.display(), line_number)
+                    format!("{known_hosts_display}:{line_number}: fingerprint must contain 64 hexadecimal characters")
                 ));
             }
 
@@ -453,11 +460,11 @@ impl KnownHosts {
                 fingerprint_result.0[j] = u8::from_str_radix(&fingerprint[j*2..j*2+2], 16)
                     .map_err(|_| io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("{}:{}: invalid fingerprint", known_hosts_path.display(), line_number)
+                        format!("{known_hosts_display}:{line_number}: invalid fingerprint")
                     ))?;
             }
 
-            hosts.insert(host.to_string(), fingerprint_result);
+            hosts.insert((hostname.to_string(), port.to_string()), fingerprint_result);
         }
 
         Ok(Self { hosts })
@@ -470,25 +477,39 @@ impl KnownHosts {
         fs::create_dir_all(&chatty_dir_path)?;
         let known_hosts_path = chatty_dir_path.join("known_hosts");
 
-        let mut f = fs::File::create(known_hosts_path)?;
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(known_hosts_path)?;
 
-        for (host, fingerprint) in &self.hosts {
-            writeln!(f, "{host} {fingerprint}")?;
+        let known_hosts_from_disk = Self::load()?;
+
+        for ((hostname, port), fingerprint) in &self.hosts {
+            if let Some(fingerprint_from_disk) = known_hosts_from_disk.hosts.get(&(hostname.to_string(), port.to_string())) {
+                if fingerprint_from_disk != fingerprint {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("two different fingerprints for host `{hostname}:{port}`\nfrom memory: {fingerprint}\nfrom disk: {fingerprint_from_disk}"
+                    )));
+                }
+            } else {
+                writeln!(f, "{hostname}:{port} {fingerprint}")?;
+            }
         }
 
         Ok(())
     }
 
-    fn get(&self, host: &str) -> Option<&Fingerprint> {
-        self.hosts.get(host)
+    fn get(&self, host: String, port: String) -> Option<&Fingerprint> {
+        self.hosts.get(&(host, port))
     }
 
-    fn add(&mut self, host: String, fingerprint: Fingerprint) {
-        self.hosts.insert(host, fingerprint);
+    fn add(&mut self, host: String, port: String, fingerprint: Fingerprint) {
+        self.hosts.insert((host, port), fingerprint);
     }
 }
 
-fn tls_config(known_host: Option<Fingerprint>) -> io::Result<(TlsConnector, Arc<TofuVerifier>)> {
+fn client_config(known_host: Option<Fingerprint>) -> io::Result<(TlsConnector, Arc<TofuVerifier>)> {
     let verifier = Arc::new(TofuVerifier::new(known_host));
 
     let config = ClientConfig::builder()
@@ -500,7 +521,7 @@ fn tls_config(known_host: Option<Fingerprint>) -> io::Result<(TlsConnector, Arc<
 }
 
 async fn create_tls_stream(known_hosts: &KnownHosts, host: &str, port: &str) -> io::Result<(TlsStream<TcpStream>, Arc<TofuVerifier>)> {
-    let (connector, verifier) = tls_config(known_hosts.get(host).cloned())?;
+    let (connector, verifier) = client_config(known_hosts.get(host.to_string(), port.to_string()).cloned())?;
 
     let raw_tcp = TcpStream::connect(format!("{host}:{port}")).await?;
 
@@ -579,7 +600,7 @@ impl App {
 
                 match input.trim().to_lowercase().as_str() {
                     "yes" => {
-                        self.known_hosts.add(host, received_key_fingerprint);
+                        self.known_hosts.add(host, port, received_key_fingerprint);
                         return self.connect(tls_stream).await;
                     }
                     "no" => return Err(io::Error::other("user doesn't want to continue connecting")),
@@ -606,7 +627,7 @@ impl App {
                 "Are you sure you want to continue connecting?"
             ), host, fingerprint);
 
-            *self.shared.popup.lock().unwrap() = Some(ActivePopup::VerifyConnect {host, fingerprint, message} );
+            *self.shared.popup.lock().unwrap() = Some(ActivePopup::VerifyConnect {host, port, fingerprint, message} );
             self.tls_stream = Some(tls_stream);
         } else {
             self.connect(tls_stream).await?;
@@ -757,10 +778,10 @@ impl App {
             KeyCode::Down => self.ui.chat_prompt.history_next(),
             other => {
                 let popup = self.shared.popup.lock().unwrap().clone();
-                if let Some(ActivePopup::VerifyConnect {host, fingerprint, ..}) = popup {
+                if let Some(ActivePopup::VerifyConnect {host, port, fingerprint, ..}) = popup {
                     if let KeyCode::Char('y') = other {
                         let tls_stream = self.tls_stream.take().unwrap();
-                        self.known_hosts.add(host.to_string(), fingerprint);
+                        self.known_hosts.add(host, port, fingerprint);
                         if let Err(err) = self.connect(tls_stream).await {
                             *self.shared.popup.lock().unwrap() = Some(ActivePopup::Error(format!("Failed to connect: {err}")));
                         } else {

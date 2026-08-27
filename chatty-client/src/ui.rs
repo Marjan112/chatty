@@ -100,6 +100,7 @@ pub enum ActivePopup {
     Error(String),
     VerifyConnect {
         host: String,
+        port: String,
         fingerprint: Fingerprint,
         message: String
     }

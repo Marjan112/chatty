@@ -126,7 +126,7 @@ struct Server {
 }
 
 impl Server {
-    fn tls_config() -> std::io::Result<TlsAcceptor> {
+    fn config() -> std::io::Result<TlsAcceptor> {
         let identity = ServerIdentity::load()?; 
 
         let config = ServerConfig::builder()
@@ -430,7 +430,7 @@ where
                         _ => {}
                     };
                 }
-                Err(err) if matches!(err.kind(), std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe) => {
+                Err(err) if matches!(err.kind(), std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset) => {
                     server_reader.client_disconnect(client_id, "connection closed").await;
                     break;
                 }
@@ -486,7 +486,7 @@ async fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind(format!("0.0.0.0:{}", args.port))
         .await
         .inspect_err(|err| eprintln!("ERROR: failed to bind: {err}"))?; 
-    let tls_acceptor = Server::tls_config()
+    let tls_acceptor = Server::config()
         .inspect_err(|err| eprintln!("ERROR: TLS config failed: {err}"))?;
 
     println!("INFO: listening on port {}...", listener.local_addr()?.port());

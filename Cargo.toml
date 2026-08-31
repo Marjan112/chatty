@@ -5,3 +5,8 @@ members = ["chatty-core", "chatty-server", "chatty-client"]
 [workspace.package]
 version = "0.11.0"
 edition = "2024"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

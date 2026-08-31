@@ -921,10 +921,6 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("failed to install rustls crypto provider");
-
     let args = Args::parse();
     let mut app = App::new()
         .inspect_err(|err| eprintln!("ERROR: Failed to initialize: {err}"))?;

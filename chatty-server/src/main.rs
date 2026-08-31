@@ -475,10 +475,6 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("failed to install rustls crypto provider");
-
     let args = Args::parse();
 
     println!("INFO: ChaTTY server {CHATTY_VERSION}");

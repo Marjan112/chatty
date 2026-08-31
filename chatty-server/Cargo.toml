@@ -5,11 +5,11 @@ edition.workspace = true
 
 [dependencies]
 tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "sync", "net", "macros"] }
-rustls = { version = "0.23.43", features = ["ring"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring"] }
 clap = { version = "4.6.5", features = ["derive"] }
 chrono = "0.4.42"
 rcgen = "0.14.9"
 rustls-pemfile = "2.2.0"
-tokio-rustls = "0.26.4"
+tokio-rustls = { version = "0.26.4", default-features = false }
 
 chatty-core = { path = "../chatty-core" }

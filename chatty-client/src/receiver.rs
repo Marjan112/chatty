@@ -14,7 +14,7 @@ use chatty_core::utils::datetime_from_timestamp;
 use crate::{
     shared::Shared,
     ui::ActivePopup,
-    chat_error
+    macros::{chat_error, chat_warn}
 };
 
 fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Shared) {
@@ -33,7 +33,7 @@ fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Share
                 datetime.into(),
                 Span::from(" "),
                 Span::styled(name, Style::default().fg(color.parse().unwrap_or_default())),
-                format!(" disconnected (reason: {reason})").into()
+                format!(" disconnected | {reason}").into()
             ])),
         Message::ClientMessage {name, color, msg} =>
             shared.add_message(Line::from(vec![
@@ -59,6 +59,22 @@ fn handle_incoming_message(timestamp_secs: i64, message: Message, shared: &Share
         Message::NameTaken { old_name } => {
             shared.add_message("name: new name that you requested is already taken by someone else".into());
             *shared.name.lock().unwrap() = old_name;
+        },
+        Message::SpamWarning { chances_left } => chat_warn!(shared, "Please stop spamming! You've got {chances_left} chances left before you get banned."),
+        Message::ClientBanned { name, color, reason } => {
+            if name == *shared.name.lock().unwrap() {
+                *shared.popup.lock().unwrap() = Some(ActivePopup::Info(format!("You have been banned (reason: {reason})")));
+                shared.connection.store(false, Ordering::Relaxed);
+                shared.messages.lock().unwrap().clear();
+                shared.clients.lock().unwrap().clear();
+            } else {
+                shared.add_message(Line::from(vec![
+                    datetime.into(),
+                    Span::from(" "),
+                    Span::styled(name, Style::default().fg(color.parse().unwrap_or_default())),
+                    format!(" has been banned | {reason}").into()
+                ]));
+            }
         }
         _ => {}
     }
@@ -78,9 +94,8 @@ fn handle_receive_error(err: io::Error, shared: &Shared) {
             }
         }
         io::ErrorKind::InvalidData => {
-            let mut messages = shared.messages.lock().unwrap();
-            chat_error!(messages, "Received invalid data. A new message kind was probably implemented and your client can't deserialize it. You should try updating your client.");
-            chat_error!(messages, "{err}");
+            chat_error!(shared, "Received invalid data. A new message kind was probably implemented and your client can't deserialize it. You should try updating your client.");
+            chat_error!(shared, "{err}");
         }
         _ => {
             shared.connection.store(false, Ordering::Relaxed);

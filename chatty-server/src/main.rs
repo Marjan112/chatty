@@ -1,10 +1,11 @@
 use std::{
     io::Write,
     fs,
-    net::SocketAddr,
-    collections::HashMap,
+    net::{SocketAddr, IpAddr},
+    collections::{HashMap, HashSet},
     hash::{Hash, Hasher, DefaultHasher},
-    sync::Arc
+    sync::{Arc, atomic::{Ordering, AtomicU64}},
+    time::{Duration, Instant}
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, AsyncRead, AsyncWrite},
@@ -22,7 +23,7 @@ use chrono::Local;
 use clap::Parser;
 
 use chatty_core::fingerprint::*;
-use chatty_core::message::{Message, KickReason, send_message, receive_message};
+use chatty_core::message::{Message, send_message, receive_message};
 use chatty_core::utils::{datetime_from_timestamp, MAX_MESSAGES};
 use chatty_core::env::CHATTY_VERSION;
 
@@ -30,7 +31,9 @@ struct Client {
     addr: SocketAddr,
     name: String,
     color: String,
-    outgoing_tx: Sender<(Option<i64>, Message)>
+    outgoing_tx: Sender<(Option<i64>, Message)>,
+    last_message: Instant,
+    chances_left: u8
 }
 
 impl Client {
@@ -39,7 +42,9 @@ impl Client {
             addr,
             name: String::new(),
             color: "reset".into(),
-            outgoing_tx
+            outgoing_tx,
+            last_message: Instant::now(),
+            chances_left: 10
         }
     }
 }
@@ -122,6 +127,7 @@ impl ServerIdentity {
 
 struct Server {
     clients: RwLock<HashMap<u64, Client>>,
+    banned: RwLock<HashSet<IpAddr>>,
     messages: Mutex<Vec<(i64, Message)>>
 }
 
@@ -142,8 +148,9 @@ impl Server {
 
     fn new() -> Self {
         Self {
-            clients: RwLock::new(HashMap::new()),
-            messages: Mutex::new(Vec::new())
+            clients: RwLock::default(),
+            banned: RwLock::default(),
+            messages: Mutex::default()
         }
     }
 
@@ -162,10 +169,10 @@ impl Server {
         }
     }
 
-    async fn client_disconnect<S: std::fmt::Display + AsRef<str>>(&self, client_id: u64, reason: S) {
+    async fn client_disconnect<S: std::fmt::Display + AsRef<str>>(&self, client_id: &u64, reason: S) {
         let client = {
             let mut clients = self.clients.write().await;
-            match clients.remove(&client_id) {
+            match clients.remove(client_id) {
                 Some(client) => client,
                 None => return
             }
@@ -189,7 +196,7 @@ impl Server {
         self.broadcast(Some(timestamp), message).await;
     }
 
-    async fn client_send_assigned_color(&self, client_id: u64) -> Option<String> {
+    async fn client_send_assigned_color(&self, client_id: &u64) -> Option<String> {
         static DEFAULT_COLORS: &[&str] = &[
             "red",
             "green",
@@ -206,7 +213,7 @@ impl Server {
 
         let (tx, color) = {
             let mut clients = self.clients.write().await;
-            let client = match clients.get_mut(&client_id) {
+            let client = match clients.get_mut(client_id) {
                 Some(client) => client,
                 None => return None
             };
@@ -228,17 +235,17 @@ impl Server {
         Some(color)
     }
 
-    async fn client_connected(&self, client_id: u64, timestamp: i64, client_name: String) {
+    async fn client_connected(&self, client_id: &u64, timestamp: i64, client_name: String) {
         let kick_tx = {
             let mut clients = self.clients.write().await;
             if clients.iter().any(|(_, c)| c.name == client_name) {
-                let client = match clients.get(&client_id) {
+                let client = match clients.get(client_id) {
                     Some(client) => client,
                     None => return
                 };
                 Some(client.outgoing_tx.clone())
             } else {
-                if let Some(client) = clients.get_mut(&client_id) {
+                if let Some(client) = clients.get_mut(client_id) {
                     client.name = client_name.clone();
                 }
                 None
@@ -248,7 +255,7 @@ impl Server {
         if let Some(tx) = kick_tx {
             let message = Message::ClientKicked {
                 name: client_name.clone(),
-                reason: KickReason::NameTaken
+                reason: "name was already taken".into()
             };
 
             let _ = tx.send((None, message)).await;
@@ -263,7 +270,7 @@ impl Server {
         let tx = {
             let clients = self.clients.read().await;
         
-            match clients.get(&client_id) {
+            match clients.get(client_id) {
                 Some(client) => client.outgoing_tx.clone(),
                 None => return
             }
@@ -284,18 +291,18 @@ impl Server {
         self.broadcast(Some(timestamp), message).await;
     }
 
-    async fn client_broadcast(&self, client_id: u64, timestamp_secs: i64, msg: String) {
+    async fn client_broadcast(&self, client_id: &u64, timestamp_secs: i64, msg: String) {
         let (txs, message, client_name) = {
             let clients = self.clients.read().await; 
 
-            let client = match clients.get(&client_id) {
+            let client = match clients.get(client_id) {
                 Some(client) => client,
                 None => return
             };
 
             let txs = clients
                 .iter()
-                .filter(|(id, _)| **id != client_id)
+                .filter(|(id, _)| *id != client_id)
                 .map(|(_, client)| client.outgoing_tx.clone())
                 .collect::<Vec<_>>();
 
@@ -317,10 +324,10 @@ impl Server {
         self.add_message(timestamp_secs, message).await;
     }
 
-    async fn send_client_list(&self, client_id: u64) {
+    async fn send_client_list(&self, client_id: &u64) {
         let (tx, clients) = {
             let clients = self.clients.read().await;
-            let client = match clients.get(&client_id) {
+            let client = match clients.get(client_id) {
                 Some(client) => client,
                 None => return
             };
@@ -335,11 +342,11 @@ impl Server {
         let _ = tx.send((None, Message::ClientList { clients })).await;
     }
 
-    async fn client_change_name(&self, client_id: u64, new_name: String) {
+    async fn client_change_name(&self, client_id: &u64, new_name: String) {
         let does_name_collide = {
             let clients = self.clients.read().await;
             if clients.iter().any(|(_, other_client)| other_client.name == new_name) {
-                let client = match clients.get(&client_id) {
+                let client = match clients.get(client_id) {
                     Some(client) => client,
                     None => return
                 };
@@ -358,7 +365,7 @@ impl Server {
         let message = {
             let mut clients = self.clients.write().await;
             
-            let client = match clients.get_mut(&client_id) {
+            let client = match clients.get_mut(client_id) {
                 Some(client) => client,
                 None => return
             };
@@ -375,10 +382,51 @@ impl Server {
         self.broadcast(None, message).await;
     }
 
-    async fn client_change_color(&self, client_id: u64, new_color: String) {
+    async fn client_change_color(&self, client_id: &u64, new_color: String) {
         let mut clients = self.clients.write().await;
-        if let Some(client) = clients.get_mut(&client_id) {
+        if let Some(client) = clients.get_mut(client_id) {
             client.color = new_color;
+        }
+    }
+
+    async fn client_message_check(&self, client_id: &u64) {
+        let tm = { 
+            let mut clients = self.clients.write().await;
+
+            let client = match clients.get_mut(client_id) {
+                Some(client) => client,
+                None => return
+            };
+
+            if Instant::now().duration_since(client.last_message) < Duration::from_millis(250) {
+                client.chances_left = client.chances_left.saturating_sub(1);
+
+                match client.chances_left {
+                    0 => {
+                        let message = Message::ClientBanned {
+                            name: client.name.clone(),
+                            color: client.color.clone(),
+                            reason: "spamming".into()
+                        };
+
+                        self.banned
+                            .write()
+                            .await
+                            .insert(client.addr.ip());
+
+                        Some((client.outgoing_tx.clone(), message))
+                    }
+                    1..=5 => Some((client.outgoing_tx.clone(), Message::SpamWarning { chances_left: client.chances_left })),
+                    _ => return
+                }
+            } else {
+                client.last_message = Instant::now();
+                return;
+            }
+        };
+
+        if let Some((tx, message)) = tm {
+            let _ = tx.send((None, message)).await;
         }
     }
 
@@ -422,20 +470,23 @@ where
             match receive_message(&mut reader).await {
                 Ok((timestamp, message)) => {
                     match message {
-                        Message::ClientConnected { name, .. } => server_reader.client_connected(client_id, timestamp, name).await,
-                        Message::ClientMessage { msg, .. } => server_reader.client_broadcast(client_id, timestamp, msg).await,
-                        Message::GetClientList => server_reader.send_client_list(client_id).await,
-                        Message::ClientWantNewName { new_name } => server_reader.client_change_name(client_id, new_name).await,
-                        Message::ClientWantNewColor { new_color } => server_reader.client_change_color(client_id, new_color).await,
+                        Message::ClientConnected { name, .. } => server_reader.client_connected(&client_id, timestamp, name).await,
+                        Message::ClientMessage { msg, .. } => {
+                            server_reader.client_message_check(&client_id).await;
+                            server_reader.client_broadcast(&client_id, timestamp, msg).await;
+                        }
+                        Message::GetClientList => server_reader.send_client_list(&client_id).await,
+                        Message::ClientWantNewName { new_name } => server_reader.client_change_name(&client_id, new_name).await,
+                        Message::ClientWantNewColor { new_color } => server_reader.client_change_color(&client_id, new_color).await,
                         _ => {}
                     };
                 }
                 Err(err) if matches!(err.kind(), std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset) => {
-                    server_reader.client_disconnect(client_id, "connection closed").await;
+                    server_reader.client_disconnect(&client_id, "connection closed").await;
                     break;
                 }
                 Err(err) => {
-                    server_reader.client_disconnect(client_id, err.to_string()).await;
+                    server_reader.client_disconnect(&client_id, err.to_string()).await;
                     break;
                 }
             }    
@@ -450,12 +501,19 @@ where
                     std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe => String::from("connection closed"),
                     _ => err.to_string()
                 };
-                server_writer.client_disconnect(client_id, reason).await;
+                server_writer.client_disconnect(&client_id, reason).await;
                 break;
             }
-            if let Message::ClientKicked { reason, .. } = message {
-                server_writer.client_disconnect(client_id, format!("kicked: {reason}")).await;
-                break;
+            match message {
+                Message::ClientKicked { reason, .. } => {
+                    server_writer.client_disconnect(&client_id, format!("kicked: {reason}")).await;
+                    break;
+                }
+                Message::ClientBanned { reason, .. } => {
+                    server_writer.client_disconnect(&client_id, format!("banned: {reason}")).await;
+                    break;
+                }
+                _ => {}
             }
         }
     });
@@ -488,18 +546,27 @@ async fn main() -> std::io::Result<()> {
     println!("INFO: listening on port {}...", listener.local_addr()?.port());
 
     let server = Arc::new(Server::new());
-    let mut client_id = 0;
+    let client_id = Arc::new(AtomicU64::new(0));
 
     loop {
         if let Ok((stream, addr)) = listener.accept().await {
-            client_id += 1;
-
             let server = server.clone();
             let tls_acceptor = tls_acceptor.clone();
+            let client_id = client_id.clone();
 
             tokio::spawn(async move {
-                let tls_stream = tls_acceptor.accept(stream).await?;
-                handle_client(server, client_id, tls_stream, addr).await
+                {
+                    let banned = server.banned.read().await;
+
+                    if banned.contains(&addr.ip()) {
+                        return Err(std::io::ErrorKind::ConnectionRefused.into());
+                    }
+                }
+
+                client_id.fetch_add(1, Ordering::Relaxed);
+
+                let tls_stream = tokio::time::timeout(Duration::from_secs(5), tls_acceptor.accept(stream)).await??;
+                handle_client(server, client_id.load(Ordering::Relaxed), tls_stream, addr).await
             });
         }
     }

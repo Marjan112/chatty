@@ -1,19 +1,6 @@
-use std::{io, fmt};
+use std::io;
 use serde::{Serialize, Deserialize};
 use tokio::io::{AsyncReadExt, AsyncRead, AsyncWriteExt, AsyncWrite};
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub enum KickReason {
-    NameTaken
-}
-
-impl fmt::Display for KickReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NameTaken => write!(f, "Name was already taken")
-        }
-    }
-}
 
 // Make clippy shut up
 #[allow(clippy::enum_variant_names)]
@@ -39,7 +26,7 @@ pub enum Message {
     },
     ClientKicked {
         name: String,
-        reason: KickReason
+        reason: String
     },
     ClientWantNewName {
         new_name: String
@@ -56,6 +43,14 @@ pub enum Message {
     },
     NameTaken {
         old_name: String
+    },
+    SpamWarning {
+        chances_left: u8
+    },
+    ClientBanned {
+        name: String,
+        color: String,
+        reason: String
     }
 }
 
@@ -64,7 +59,7 @@ pub async fn receive_message<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result
     let message_len = reader.read_u32_le().await? as usize;
     
     if message_len > 1024 * 1024 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("message is too long: {message_len}")));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("message is too long: {message_len}B")));
     }
 
     let mut message_bytes = vec![0u8; message_len];

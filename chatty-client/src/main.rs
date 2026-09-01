@@ -576,7 +576,7 @@ impl App {
     }
 
     async fn connect(&mut self, mut tls_stream: TlsStream<TcpStream>) -> io::Result<()> {
-        init_handshake(&mut tls_stream).await?;
+        tokio::time::timeout(Duration::from_secs(5), init_handshake(&mut tls_stream)).await??;
 
         let (reader, mut writer) = tokio::io::split(tls_stream);
 
@@ -783,10 +783,7 @@ impl App {
                                 format!(": {input}").into()
                             ]));
                         }
-                        Err(err) => {
-                            let mut messages = self.shared.messages.lock().unwrap();
-                            chat_error!(messages, "Failed to send message: {err}");
-                        }
+                        Err(err) => chat_error!(self.shared, "Failed to send message: {err}")
                     }
 
                     self.ui.chat_prompt.textarea.clear();

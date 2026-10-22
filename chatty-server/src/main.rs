@@ -13,10 +13,9 @@ use tokio::{
     sync::{RwLock, Mutex, mpsc::{self, Sender}}
 };
 use rustls::{
-    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
+    pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, pem::PemObject},
     ServerConfig
 };
-use rustls_pemfile::{certs, private_key};
 use tokio_rustls::TlsAcceptor;
 use rcgen::generate_simple_self_signed;
 use chrono::Local;
@@ -81,22 +80,11 @@ impl ServerIdentity {
         let key_path = chatty_config.join("server.key");
         
         let (certificate, private_key) = if cert_path.exists() && key_path.exists() {
-            let cert_file = fs::File::open(&cert_path)?;
-            let key_file = fs::File::open(&key_path)?;
-
-            let mut cert_reader = std::io::BufReader::new(cert_file);
-            let mut key_reader = std::io::BufReader::new(key_file);
-
-            let mut certs: Vec<CertificateDer> = certs(&mut cert_reader)
-                .collect::<Result<_, _>>()
+            let certificate = CertificateDer::from_pem_file(cert_path)
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
-            let certificate = certs
-                .pop()
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no certificate found"))?;
-
-            let private_key = private_key(&mut key_reader)?
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no private key found"))?;
+            let private_key = PrivateKeyDer::from_pem_file(key_path)
+                .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
             (certificate, private_key)
         } else {

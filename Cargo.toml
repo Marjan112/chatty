@@ -6,6 +6,13 @@ members = ["chatty-core", "chatty-server", "chatty-client"]
 version = "0.12.1"
 edition = "2024"
 
+[workspace.dependencies]
+tokio = "1.53.1"
+tokio-rustls = "0.26.4"
+rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
+chrono = "0.4.42"
+clap = { version = "4.6.5", features = ["derive"] }
+
 [profile.release]
 strip = true
 lto = true

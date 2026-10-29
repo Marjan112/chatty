@@ -9,6 +9,6 @@ rustls = { workspace = true }
 clap = { workspace = true }
 chrono = { workspace = true }
 tokio-rustls = { workspace = true, default-features = false }
-rcgen = "0.14.9"
+rcgen = "0.14.10"
 
 chatty-core = { path = "../chatty-core" }

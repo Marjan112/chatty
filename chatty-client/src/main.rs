@@ -240,7 +240,7 @@ const COMMANDS: &[Command] = &[
             match input.parse::<ThemeKind>() {
                 Ok(new_theme_kind) => {
                     app.ui.theme_kind = new_theme_kind;
-                    app.shared.add_message(format!("theme: changed the theme to {new_theme_kind}").into());
+                    app.shared.add_message(format!("theme: changed the theme to `{new_theme_kind}`").into());
                 }
                 Err(_) => app.shared.add_message(format!("theme: `{input}` not supported", ).into())
             }
@@ -695,37 +695,34 @@ impl App {
             }
             KeyCode::Tab => {
                 if self.shared.connection.load(Ordering::Relaxed) {
-                    let selected = if let Some(completion) = &mut self.ui.chat_prompt.completion_state {
-                        completion.next().map(str::to_owned)
-                    } else {
-                        None
-                    };
+                    if let Some(completion) = &mut self.ui.chat_prompt.completion_state {
+                        if let Some(cmd) = completion.next().map(str::to_owned) {
+                            self.ui.chat_prompt.set_text(format!("/{cmd}"));
+                            return;
+                        }
+                    }
 
-                    if let Some(cmd) = selected {
-                        self.ui.chat_prompt.set_text(format!("/{cmd}"));
-                    } else {
-                        let current_input = self.ui.chat_prompt.textarea.lines()[0].trim();
-                        if current_input.starts_with('/') && !current_input.contains(' ') {
-                            let input_cmd = &current_input[1..];
+                    let current_input = self.ui.chat_prompt.textarea.lines()[0].trim();
+                    if current_input.starts_with('/') && !current_input.contains(' ') {
+                        let input_cmd = &current_input[1..];
 
-                            let matches: Vec<&str> = COMMANDS
-                                .iter()
-                                .filter(|cmd| cmd.name.starts_with(input_cmd))
-                                .map(|cmd| cmd.name)
-                                .collect();
+                        let matches: Vec<&str> = COMMANDS
+                            .iter()
+                            .filter(|cmd| cmd.name.starts_with(input_cmd))
+                            .map(|cmd| cmd.name)
+                            .collect();
 
-                            match matches.len() {
-                                0 => {}
-                                1 => self.ui.chat_prompt.set_text(format!("/{}", matches[0])),
-                                _ => {
-                                    let completion_state = CompletionState::new(matches);
+                        match matches.len() {
+                            0 => {}
+                            1 => self.ui.chat_prompt.set_text(format!("/{}", matches[0])),
+                            _ => {
+                                let completion_state = CompletionState::new(matches);
 
-                                    if let Some(cmd) = completion_state.selected() {
-                                        self.ui.chat_prompt.set_text(format!("/{cmd}"));
-                                    }
-
-                                    self.ui.chat_prompt.completion_state = Some(completion_state);
+                                if let Some(cmd) = completion_state.selected() {
+                                    self.ui.chat_prompt.set_text(format!("/{cmd}"));
                                 }
+
+                                self.ui.chat_prompt.completion_state = Some(completion_state);
                             }
                         }
                     }

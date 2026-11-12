@@ -292,7 +292,6 @@ fn set_panic_hook() {
     std::panic::set_hook(Box::new(move |info| {
         let _ = restore_terminal();
         hook(info);
-        std::process::exit(1);
     }));
 }
 

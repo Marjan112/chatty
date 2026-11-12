@@ -11,6 +11,79 @@ use ratatui_textarea::{DataCursor, TextArea};
 use crate::Shared;
 use crate::Fingerprint;
 
+pub struct Theme {
+    pub foreground: Color,
+    pub background: Color,
+    pub border: Color,
+    pub muted: Color,
+    pub info: Color,
+    pub error: Color
+}
+
+#[derive(Default, Clone, Copy)]
+pub enum ThemeKind {
+    #[default]
+    Default,
+    Catppuccin,
+    Everforest
+}
+
+impl ThemeKind {
+    pub const fn into(self) -> Theme {
+        match self {
+            Self::Default => Theme {
+                foreground: Color::White,
+                background: Color::Reset,
+                border: Color::Yellow,
+                muted: Color::DarkGray,
+                info: Color::LightBlue,
+                error: Color::LightRed
+            },
+            Self::Catppuccin => Theme {
+                foreground: Color::Rgb(205, 214, 244),
+                background: Color::Rgb(30, 30, 46),
+                border: Color::Rgb(180, 190, 254),
+                muted: Color::Rgb(108, 112, 134),
+                info: Color::Rgb(137, 180, 250),
+                error: Color::Rgb(243, 139, 168)
+            },
+            Self::Everforest => Theme {
+                foreground: Color::Rgb(211, 198, 170),
+                background: Color::Rgb(46, 56, 60),
+                border: Color::Rgb(167, 192, 128),
+                muted: Color::Rgb(122, 132, 120),
+                info: Color::Rgb(127, 187, 179),
+                error: Color::Rgb(230, 126, 128)
+            }
+        }
+    }
+}
+
+pub struct InvalidThemeError;
+
+impl std::str::FromStr for ThemeKind {
+    type Err = InvalidThemeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "default" => Ok(Self::Default),
+            "catppuccin" => Ok(Self::Catppuccin),
+            "everforest" => Ok(Self::Everforest),
+            _ => Err(InvalidThemeError)
+        }
+    }
+}
+
+impl std::fmt::Display for ThemeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Default => write!(f, "default"),
+            Self::Catppuccin => write!(f, "catppuccin"),
+            Self::Everforest => write!(f, "everforest")
+        } 
+    }
+}
+
 #[derive(Default)]
 pub struct Popup<'a> {
     title: Line<'a>,
@@ -78,7 +151,6 @@ impl<'a> Popup<'a> {
 
 impl Widget for Popup<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        Clear.render(area, buf);
         let block = Block::bordered()
             .title(self.title)
             .title_bottom(self.title_bottom)
@@ -107,42 +179,43 @@ pub enum ActivePopup {
 }
 
 impl ActivePopup {
-    pub fn draw(&self, frame: &mut Frame) {
+    pub fn draw(&self, frame: &mut Frame, theme_kind: ThemeKind) {
         let area = frame.area();
+        let theme: Theme = theme_kind.into();
         match self {
             ActivePopup::Info(message) =>
                 Popup::default()
                     .content(message.as_str())
-                    .style(Style::default())
+                    .style(Style::default().fg(theme.foreground))
                     .title_alignment(HorizontalAlignment::Center)
                     .title(" Info ")
-                    .title_bottom(vec![" <ESC> ".light_blue(), "dismiss ".dark_gray()])
-                    .title_style(Style::default().light_blue())
-                    .border_style(Style::default().light_blue())
+                    .title_bottom(vec![" <ESC> ".fg(theme.info), "dismiss ".fg(theme.muted)])
+                    .title_style(Style::default().fg(theme.info))
+                    .border_style(Style::default().fg(theme.info))
                     .render_centered(area, frame.buffer_mut()),
             ActivePopup::Error(message) =>
                 Popup::default()
                     .content(message.as_str())
-                    .style(Style::default())
+                    .style(Style::default().fg(theme.foreground))
                     .title_alignment(HorizontalAlignment::Center)
                     .title(" Error ")
-                    .title_bottom(vec![" <ESC> ".light_red(), "dismiss ".dark_gray()])
-                    .title_style(Style::default().light_red())
-                    .border_style(Style::default().light_red())
+                    .title_bottom(vec![" <ESC> ".fg(theme.error), "dismiss ".fg(theme.muted)])
+                    .title_style(Style::default().fg(theme.error))
+                    .border_style(Style::default().fg(theme.error))
                     .render_centered(area, frame.buffer_mut()),
             ActivePopup::VerifyConnect { message, .. } =>
                 Popup::default()
                     .content(message.as_str())
-                    .style(Style::default())
+                    .style(Style::default().fg(theme.foreground))
                     .title_alignment(HorizontalAlignment::Center)
                     .title(" Verification ")
                     .title_bottom(vec![
-                        " <Y> ".green(), "yes ".dark_gray(),
-                        "|".reset(),
-                        " <N> ".green(), "no ".dark_gray()
+                        " <Y> ".fg(theme.border), "yes ".fg(theme.muted),
+                        "|".fg(theme.border),
+                        " <N> ".fg(theme.border), "no ".fg(theme.muted)
                     ])
-                    .title_style(Style::default().green())
-                    .border_style(Style::default().green())
+                    .title_style(Style::default().fg(theme.border))
+                    .border_style(Style::default().fg(theme.border))
                     .render_centered(area, frame.buffer_mut())
         }
     }
@@ -357,7 +430,8 @@ pub struct Ui {
     client_list_scroll: ScrollState,
     pub connect_form: ConnectForm,
     pub chat_window_area: Rect,
-    pub client_list_area: Rect
+    pub client_list_area: Rect,
+    pub theme_kind: ThemeKind
 }
 
 impl Ui {
@@ -370,17 +444,19 @@ impl Ui {
             .flex(Flex::Center)
             .areas(vertical);
 
+        let theme = self.theme_kind.into();
+
         let container = Block::bordered()
             .title(" ChaTTY - Connect ")
             .title_alignment(HorizontalAlignment::Center)
             .title_bottom(vec![
-                " <TAB> ".yellow(),
-                "next ".dark_gray(),
-                "|".reset(),
-                " <ESC> ".yellow(),
-                "exit ".dark_gray()
+                " <TAB> ".fg(theme.border),
+                "next ".fg(theme.muted),
+                "|".fg(theme.border),
+                " <ESC> ".fg(theme.border),
+                "exit ".fg(theme.muted)
             ])
-            .yellow();
+            .fg(theme.border);
 
         let container_inner = container.inner(horizontal);
 
@@ -396,7 +472,9 @@ impl Ui {
     }
 
     fn draw_connect_form_address(&mut self, frame: &mut Frame, field_address_area: Rect) {
-        let color = if self.connect_form.focused == ConnectFormField::Address { Color::Yellow } else { Color::DarkGray };
+        let theme = self.theme_kind.into();
+
+        let color = if self.connect_form.focused == ConnectFormField::Address { theme.border } else { theme.muted };
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -404,8 +482,9 @@ impl Ui {
             .fg(color);
 
         self.address_input_box.set_block(block);
-        self.address_input_box.set_cursor_line_style(Style::default().fg(Color::Reset));
+        self.address_input_box.set_cursor_line_style(Style::default().fg(theme.foreground));
         self.address_input_box.set_placeholder_text("Enter the server address...");
+        self.address_input_box.set_placeholder_style(Style::default().fg(theme.muted));
 
         if self.connect_form.focused == ConnectFormField::Address {
             self.address_input_box.set_cursor_style(Style::default().reversed());
@@ -417,7 +496,9 @@ impl Ui {
     }
 
     fn draw_connect_form_name(&mut self, frame: &mut Frame, field_address_name: Rect) {
-        let color = if self.connect_form.focused == ConnectFormField::Name { Color::Yellow } else { Color::DarkGray };
+        let theme = self.theme_kind.into();
+
+        let color = if self.connect_form.focused == ConnectFormField::Name { theme.border } else { theme.muted };
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -425,8 +506,9 @@ impl Ui {
             .fg(color);
 
         self.name_input_box.set_block(block);
-        self.name_input_box.set_cursor_line_style(Style::default().fg(Color::Reset));
+        self.name_input_box.set_cursor_line_style(Style::default().fg(theme.foreground));
         self.name_input_box.set_placeholder_text("Enter your name...");
+        self.name_input_box.set_placeholder_style(Style::default().fg(theme.muted));
 
         if self.connect_form.focused == ConnectFormField::Name {
             self.name_input_box.set_cursor_style(Style::default().reversed());
@@ -483,9 +565,12 @@ impl Ui {
             .map(|(name, color)| Line::styled(name, Style::default().fg(*color)))
             .collect();
 
+        let theme = self.theme_kind.into();
+
         let block = Block::bordered()
-            .title(format!(" Clients ({}) ", clients.len()).yellow())
-            .title_alignment(HorizontalAlignment::Center);
+            .title(format!(" Clients ({}) ", clients.len()).fg(theme.border))
+            .title_alignment(HorizontalAlignment::Center)
+            .fg(theme.foreground);
 
         let list = Paragraph::new(clients)
             .block(block)
@@ -506,9 +591,12 @@ impl Ui {
     fn draw_chat_window(&mut self, frame: &mut Frame, shared: &Shared) {
         let messages = shared.messages.lock().unwrap();
 
+        let theme = self.theme_kind.into();
+
         let block = Block::bordered()
-            .title(" Chat ".yellow())
-            .title_alignment(HorizontalAlignment::Center);
+            .title(" Chat ".fg(theme.border))
+            .title_alignment(HorizontalAlignment::Center)
+            .fg(theme.foreground);
 
         let chat = Paragraph::new(messages.clone())
             .wrap(Wrap { trim: true })
@@ -532,13 +620,16 @@ impl Ui {
         let name = shared.name.lock().unwrap().to_owned();
         let color = shared.color.lock().unwrap();
 
+        let theme = self.theme_kind.into();
+
         let block = Block::bordered()
             .title(vec![" You (".into(), Span::styled(name, Style::default().fg(*color)), "): ".into()])
-            .yellow();
+            .fg(theme.border);
 
         self.chat_prompt.textarea.set_block(block);
-        self.chat_prompt.textarea.set_cursor_line_style(Style::default().fg(Color::Reset));
+        self.chat_prompt.textarea.set_cursor_line_style(Style::default().fg(theme.foreground));
         self.chat_prompt.textarea.set_placeholder_text("Your message...");
+        self.chat_prompt.textarea.set_placeholder_style(Style::default().fg(theme.muted));
 
         frame.render_widget(&self.chat_prompt.textarea, chat_prompt_area);
         
@@ -578,11 +669,13 @@ impl Ui {
 
             let [list_area, scrollbar_area] = Layout::horizontal([Constraint::Min(1), Constraint::Length(1)]).areas(popup_area);
 
+            let theme = self.theme_kind.into();
+
             let list_widget = List::new(completion.matches.clone())
-                .style(Color::White)
+                .fg(theme.foreground)
                 .highlight_style(Style::default()
-                    .bg(Color::Yellow)
-                    .fg(Color::Black));
+                    .bg(theme.border)
+                    .fg(theme.muted));
 
             frame.render_widget(Clear, popup_area);
 
@@ -602,6 +695,11 @@ impl Ui {
                 &mut completion.scrollbar_state
             );
         }
+    }
+
+    pub fn fill_background_theme(&mut self, frame: &mut Frame) {
+        let theme = self.theme_kind.into();
+        frame.render_widget(Block::default().bg(theme.background), frame.area());
     }
 
     pub fn chat_scroll_up(&mut self) {

@@ -226,29 +226,49 @@ const COMMANDS: &[Command] = &[
 
             app.writer = None;
         })
+    },
+    Command {
+        name: "theme",
+        description: "Change the theme",
+        signature: "/theme <new theme>",
+        run: CommandRun::Sync(|app, input| {
+            if input.is_empty() {
+                app.shared.add_message(format!("theme: {}", app.ui.theme_kind).into());
+                return;
+            }
+
+            match input.parse::<ThemeKind>() {
+                Ok(new_theme_kind) => {
+                    app.ui.theme_kind = new_theme_kind;
+                    app.shared.add_message(format!("theme: changed the theme to {new_theme_kind}").into());
+                }
+                Err(_) => app.shared.add_message(format!("theme: `{input}` not supported", ).into())
+            }
+        })
     }
 ];
 
-pub fn greet_message() -> Vec<Line<'static>> {
+pub fn greet_message(theme_kind: ThemeKind) -> Vec<Line<'static>> {
+    let theme = theme_kind.into();
     vec![
         Line::from(vec![
-            "ChaTTY ".yellow(),
+            "ChaTTY ".fg(theme.border),
             "client ".into(),
-            CHATTY_VERSION.yellow()
+            CHATTY_VERSION.fg(theme.border)
         ]),
         Line::from(vec![
             "Type and press ".into(),
-            "ENTER".yellow(),
+            "ENTER".fg(theme.border),
             " to send".into()
         ]),
         Line::from(vec![
             "Type ".into(),
-            "/help".yellow(),
+            "/help".fg(theme.border),
             " for help".into()
         ]),
         Line::from(vec![
             "Press ".into(),
-            "ESC".yellow(),
+            "ESC".fg(theme.border),
             " to exit".into()
         ])
     ]
@@ -594,7 +614,7 @@ impl App {
         self.writer = Some(writer);
         self.shared.connection.store(true, Ordering::Relaxed);
         *self.shared.name.lock().unwrap() = name;
-        *self.shared.messages.lock().unwrap() = greet_message();
+        *self.shared.messages.lock().unwrap() = greet_message(self.ui.theme_kind);
         self.receiver_task = Some(spawn_receiver(reader, self.shared.clone()));
 
         Ok(())
@@ -870,11 +890,13 @@ impl App {
             self.handle_events(&event_rx).await;
 
             terminal.draw(|frame| {
+                self.ui.fill_background_theme(frame);
+
                 if self.shared.connection.load(Ordering::Relaxed) {
                     self.ui.draw_chat(frame, &self.shared);
                 } else {
                     if let Some(popup) = self.shared.popup.lock().unwrap().as_ref() {
-                        popup.draw(frame);
+                        popup.draw(frame, self.ui.theme_kind);
                     } else {
                         self.ui.draw_connect_form(frame);
                     }

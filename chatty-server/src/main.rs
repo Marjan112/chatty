@@ -551,10 +551,10 @@ async fn main() -> std::io::Result<()> {
                     }
                 }
 
-                client_id.fetch_add(1, Ordering::Relaxed);
+                let client_id = client_id.fetch_add(1, Ordering::Relaxed);
 
                 let tls_stream = tokio::time::timeout(Duration::from_secs(5), tls_acceptor.accept(stream)).await??;
-                handle_client(server, client_id.load(Ordering::Relaxed), tls_stream, addr).await
+                handle_client(server, client_id, tls_stream, addr).await
             });
         }
     }

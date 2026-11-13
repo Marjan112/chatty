@@ -311,26 +311,28 @@ impl ScrollState {
 }
 
 pub struct CompletionState {
+    prefix: String,
     matches: Vec<&'static str>,
     list_state: ListState,
     scrollbar_state: ScrollbarState
 }
 
 impl CompletionState {
-    pub fn new(matches: Vec<&'static str>) -> Self {
+    pub fn new(prefix: String, matches: Vec<&'static str>) -> Self {
         let mut list_state = ListState::default();
         if !matches.is_empty() {
             list_state.select(Some(0));
         }
 
         Self {
+            prefix,
             matches,
             list_state,
             scrollbar_state: ScrollbarState::default()
         }
     }
 
-    pub fn next(&mut self) -> Option<&str> {
+    pub fn next(&mut self) -> Option<String> {
         if self.matches.is_empty() {
             return None;
         }
@@ -342,13 +344,13 @@ impl CompletionState {
         let next_index = (index + 1) % self.matches.len();
 
         self.list_state.select(Some(next_index));
-        Some(self.matches[next_index])
+        self.selected()
     }
 
-    pub fn selected(&self) -> Option<&str> {
-        self.list_state
-            .selected()
-            .map(|i| self.matches[i])
+    pub fn selected(&self) -> Option<String> {
+        let index = self.list_state.selected()?;
+        let item = self.matches.get(index)?;
+        Some(format!("{}{}", self.prefix, item))
     }
 }
 

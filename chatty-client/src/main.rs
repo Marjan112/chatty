@@ -112,6 +112,7 @@ struct Command {
     name: &'static str,
     description: &'static str,
     signature: &'static str,
+    predictable_args: Option<&'static [&'static str]>,
     run: CommandRun
 }
 
@@ -120,6 +121,7 @@ const COMMANDS: &[Command] = &[
         name: "help",
         description: "Helps, duh",
         signature: "/help",
+        predictable_args: None,
         run: CommandRun::Sync(|app, _| {
             app.shared.add_message(Line::from("Help:"));
 
@@ -132,12 +134,14 @@ const COMMANDS: &[Command] = &[
         name: "clear",
         description: "Clears the chat",
         signature: "/clear",
+        predictable_args: None,
         run: CommandRun::Sync(|app, _| app.shared.messages.lock().unwrap().clear())
     },
     Command {
         name: "name",
         description: "Change your display name",
         signature: "/name <new name>",
+        predictable_args: None,
         run: CommandRun::Async(|app, new_name| Box::pin(async move {
             if new_name.is_empty() {
                 app.shared.add_message("usage: /name <new name>".into());
@@ -167,6 +171,7 @@ const COMMANDS: &[Command] = &[
         name: "color",
         description: "Change your color",
         signature: "/color <new color>",
+        predictable_args: Some(&[/*colors*/]),
         run: CommandRun::Async(|app, new_color| Box::pin(async move {
             if new_color.is_empty() {
                 app.shared.add_message("usage: /color <new color>".into());
@@ -202,18 +207,21 @@ const COMMANDS: &[Command] = &[
         name: "exit",
         description: "Exits the app",
         signature: "/exit",
+        predictable_args: None,
         run: CommandRun::Sync(exit_app)
     },
     Command {
         name: "quit",
         description: "Does the same as /exit",
         signature: "/quit",
+        predictable_args: None,
         run: CommandRun::Sync(exit_app)
     },
     Command {
         name: "disconnect",
         description: "Disconnect but does not exit",
         signature: "/disconnect",
+        predictable_args: None,
         run: CommandRun::Sync(|app, _| {
             app.shared.connection.store(false, Ordering::Relaxed);
 
@@ -231,6 +239,7 @@ const COMMANDS: &[Command] = &[
         name: "theme",
         description: "Change the theme",
         signature: "/theme <new theme>",
+        predictable_args: Some(&["default", "catppuccin", "everforest"]),
         run: CommandRun::Sync(|app, input| {
             if input.is_empty() {
                 app.shared.add_message(format!("theme: {}", app.ui.theme_kind).into());
@@ -695,34 +704,52 @@ impl App {
             KeyCode::Tab => {
                 if self.shared.connection.load(Ordering::Relaxed) {
                     if let Some(completion) = &mut self.ui.chat_prompt.completion_state {
-                        if let Some(cmd) = completion.next().map(str::to_owned) {
-                            self.ui.chat_prompt.set_text(format!("/{cmd}"));
+                        if let Some(full_cmd) = completion.next() {
+                            self.ui.chat_prompt.set_text(full_cmd);
                             return;
                         }
                     }
 
-                    let current_input = self.ui.chat_prompt.textarea.lines()[0].trim();
-                    if current_input.starts_with('/') && !current_input.contains(' ') {
-                        let input_cmd = &current_input[1..];
+                    let input = self.ui.chat_prompt.textarea.lines()[0].trim_start();
+                    let Some(input_cmd) = input.strip_prefix('/') else { return; };
 
-                        let matches: Vec<&str> = COMMANDS
-                            .iter()
-                            .filter(|cmd| cmd.name.starts_with(input_cmd))
-                            .map(|cmd| cmd.name)
-                            .collect();
+                    let (prefix, matches): (String, Vec<&'static str>) =
+                        if let Some((cmd_name, arg_part)) = input_cmd.split_once(' ') {
+                            let arg_prefix = arg_part.trim_start();
+                            let possible_args = COMMANDS
+                                .iter()
+                                .find(|cmd| cmd.name == cmd_name)
+                                .and_then(|cmd| cmd.predictable_args)
+                                .map(|args| {
+                                    args.iter()
+                                        .copied()
+                                        .filter(|arg| arg.starts_with(arg_prefix))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
 
-                        match matches.len() {
-                            0 => {}
-                            1 => self.ui.chat_prompt.set_text(format!("/{}", matches[0])),
-                            _ => {
-                                let completion_state = CompletionState::new(matches);
+                            (format!("/{cmd_name} "), possible_args)
+                        } else {
+                            let possible_cmds = COMMANDS
+                                .iter()
+                                .filter(|cmd| cmd.name.starts_with(input_cmd))
+                                .map(|cmd| cmd.name)
+                                .collect();
 
-                                if let Some(cmd) = completion_state.selected() {
-                                    self.ui.chat_prompt.set_text(format!("/{cmd}"));
-                                }
+                            ('/'.to_string(), possible_cmds)
+                        };
 
-                                self.ui.chat_prompt.completion_state = Some(completion_state);
+                    match matches.len() {
+                        0 => {}
+                        1 => self.ui.chat_prompt.set_text(format!("{}{}", prefix, matches[0])),
+                        _ => {
+                            let completion_state = CompletionState::new(prefix, matches);
+
+                            if let Some(full_cmd) = completion_state.selected() {
+                                self.ui.chat_prompt.set_text(full_cmd);
                             }
+
+                            self.ui.chat_prompt.completion_state = Some(completion_state);
                         }
                     }
                 } else if self.shared.popup.lock().unwrap().is_none() {

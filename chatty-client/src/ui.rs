@@ -14,6 +14,11 @@ use crate::Fingerprint;
 pub struct Theme {
     pub foreground: Color,
     pub background: Color,
+    pub surface: Color,
+    pub selection_foreground: Color,
+    pub selection_background: Color,
+    pub scrollbar: Color,
+    pub scrollbar_track: Color,
     pub border: Color,
     pub muted: Color,
     pub info: Color,
@@ -34,6 +39,11 @@ impl ThemeKind {
             Self::Default => Theme {
                 foreground: Color::White,
                 background: Color::Reset,
+                surface: Color::Reset,
+                selection_foreground: Color::Black,
+                selection_background: Color::Yellow,
+                scrollbar: Color::Yellow,
+                scrollbar_track: Color::DarkGray,
                 border: Color::Yellow,
                 muted: Color::DarkGray,
                 info: Color::LightBlue,
@@ -42,6 +52,11 @@ impl ThemeKind {
             Self::Catppuccin => Theme {
                 foreground: Color::Rgb(205, 214, 244),
                 background: Color::Rgb(30, 30, 46),
+                surface: Color::Rgb(17, 17, 27),
+                selection_foreground: Color::Rgb(166, 173, 200),
+                selection_background: Color::Rgb(49, 50, 68),
+                scrollbar: Color::Rgb(108, 112, 134),
+                scrollbar_track: Color::Rgb(49, 50, 68),
                 border: Color::Rgb(180, 190, 254),
                 muted: Color::Rgb(108, 112, 134),
                 info: Color::Rgb(137, 180, 250),
@@ -50,6 +65,11 @@ impl ThemeKind {
             Self::Everforest => Theme {
                 foreground: Color::Rgb(211, 198, 170),
                 background: Color::Rgb(46, 56, 60),
+                surface: Color::Rgb(30, 35, 38),
+                selection_foreground: Color::Rgb(211, 198, 170),
+                selection_background: Color::Rgb(39, 46, 51),
+                scrollbar: Color::Rgb(167, 192, 128),
+                scrollbar_track: Color::Rgb(79, 91, 88),
                 border: Color::Rgb(167, 192, 128),
                 muted: Color::Rgb(122, 132, 120),
                 info: Color::Rgb(127, 187, 179),
@@ -675,9 +695,10 @@ impl Ui {
 
             let list_widget = List::new(completion.matches.clone())
                 .fg(theme.foreground)
+                .bg(theme.surface)
                 .highlight_style(Style::default()
-                    .bg(theme.border)
-                    .fg(theme.muted));
+                    .bg(theme.selection_background)
+                    .fg(theme.selection_foreground));
 
             frame.render_widget(Clear, popup_area);
 
@@ -688,11 +709,14 @@ impl Ui {
                 .viewport_content_length(list_area.height as usize)
                 .position(completion.list_state.offset());
 
+            frame.render_widget(Block::default().bg(theme.scrollbar_track), scrollbar_area);
+
             frame.render_stateful_widget(
                 Scrollbar::default()
                     .begin_symbol(None)
                     .end_symbol(None)
                     .track_symbol(None)
+                    .style(Style::default().fg(theme.scrollbar))
                 ,scrollbar_area,
                 &mut completion.scrollbar_state
             );

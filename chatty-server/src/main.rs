@@ -331,43 +331,33 @@ impl Server {
     }
 
     async fn client_change_name(&self, client_id: &u64, new_name: String) {
-        let does_name_collide = {
-            let clients = self.clients.read().await;
-            if clients.iter().any(|(_, other_client)| other_client.name == new_name) {
-                let client = match clients.get(client_id) {
-                    Some(client) => client,
-                    None => return
-                };
-                Some((client.outgoing_tx.clone(), client.name.clone()))
-            } else {
-                None
-            }
-        };
-
-        if let Some((tx, old_name)) = does_name_collide {
-            let message = Message::NameTaken { old_name };
-            let _ = tx.send((None, message)).await;
-            return;
-        }
-
-        let message = {
+        let result = {
             let mut clients = self.clients.write().await;
-            
-            let client = match clients.get_mut(client_id) {
-                Some(client) => client,
-                None => return
-            };
-            let old_name = client.name.clone();
 
-            client.name = new_name.clone();
-            
-            Message::ClientChangedName {
-                old_name,
-                new_name
+            let name_taken = clients
+                .iter()
+                .any(|(_, other_client)| other_client.name == new_name);
+
+            let Some(client) = clients.get_mut(client_id) else { return };
+
+            if name_taken {
+                Err((client.outgoing_tx.clone(), client.name.clone()))
+            } else {
+                let old_name = std::mem::replace(&mut client.name, new_name.clone());
+                Ok(Message::ClientChangedName {
+                    old_name,
+                    new_name
+                })
             }
         };
 
-        self.broadcast(None, message).await;
+        match result {
+            Ok(message) => self.broadcast(None, message).await,
+            Err((tx, old_name)) => {
+                let message = Message::NameTaken { old_name };
+                let _ = tx.send((None, message)).await;
+            }
+        }
     }
 
     async fn client_change_color(&self, client_id: &u64, new_color: String) {

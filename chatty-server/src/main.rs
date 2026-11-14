@@ -43,7 +43,7 @@ impl Client {
             color: "reset".into(),
             outgoing_tx,
             last_message: Instant::now(),
-            chances_left: 10
+            chances_left: 6
         }
     }
 }
@@ -111,6 +111,12 @@ impl ServerIdentity {
             fingerprint
         })
     }
+}
+
+enum MessageCheckDecision {
+    Allow,
+    Reject,
+    Ban
 }
 
 struct Server {
@@ -367,45 +373,50 @@ impl Server {
         }
     }
 
-    async fn client_message_check(&self, client_id: &u64) {
-        let tm = { 
+    async fn client_message_check(&self, client_id: &u64) -> MessageCheckDecision {
+        let (tx, message, ban_ip) = { 
             let mut clients = self.clients.write().await;
 
             let client = match clients.get_mut(client_id) {
                 Some(client) => client,
-                None => return
+                // NOTE: This case shouldn't happen. if it does, then something is wrong.
+                None => return MessageCheckDecision::Reject
             };
 
-            if Instant::now().duration_since(client.last_message) < Duration::from_millis(250) {
-                client.chances_left = client.chances_left.saturating_sub(1);
-
-                match client.chances_left {
-                    0 => {
-                        let message = Message::ClientBanned {
-                            name: client.name.clone(),
-                            color: client.color.clone(),
-                            reason: "spamming".into()
-                        };
-
-                        self.banned
-                            .write()
-                            .await
-                            .insert(client.addr.ip());
-
-                        Some((client.outgoing_tx.clone(), message))
-                    }
-                    1..=5 => Some((client.outgoing_tx.clone(), Message::SpamWarning { chances_left: client.chances_left })),
-                    _ => return
-                }
-            } else {
-                client.last_message = Instant::now();
-                return;
+            let now = Instant::now();
+            if now.duration_since(client.last_message) >= Duration::from_millis(250) {
+                client.last_message = now;
+                return MessageCheckDecision::Allow;
             }
+
+            client.chances_left = client.chances_left.saturating_sub(1);
+
+            let (message, ban_ip) = match client.chances_left {
+                0 => (
+                    Message::ClientBanned {
+                        name: client.name.clone(),
+                        color: client.color.clone(),
+                        reason: "spamming".into()
+                    },
+                    Some(client.addr.ip())
+                ),
+                chances_left => (
+                    Message::SpamWarning { chances_left },
+                    None
+                ),
+            };
+
+            (client.outgoing_tx.clone(), message, ban_ip)
         };
 
-        if let Some((tx, message)) = tm {
-            let _ = tx.send((None, message)).await;
+        let _ = tx.send((None, message)).await;
+
+        if let Some(ip) = ban_ip {
+            self.banned.write().await.insert(ip);
+            return MessageCheckDecision::Ban;
         }
+
+        MessageCheckDecision::Reject
     }
 
     async fn broadcast(&self, timestamp: Option<i64>, msg: Message) {
@@ -449,10 +460,11 @@ where
                 Ok((timestamp, message)) => {
                     match message {
                         Message::ClientConnected { name, .. } => server_reader.client_connected(&client_id, timestamp, name).await,
-                        Message::ClientMessage { msg, .. } => {
-                            server_reader.client_message_check(&client_id).await;
-                            server_reader.client_broadcast(&client_id, timestamp, msg).await;
-                        }
+                        Message::ClientMessage { msg, .. } => match server_reader.client_message_check(&client_id).await {
+                            MessageCheckDecision::Allow => server_reader.client_broadcast(&client_id, timestamp, msg).await,
+                            MessageCheckDecision::Reject => {},
+                            MessageCheckDecision::Ban => break
+                        },
                         Message::GetClientList => server_reader.send_client_list(&client_id).await,
                         Message::ClientWantNewName { new_name } => server_reader.client_change_name(&client_id, new_name).await,
                         Message::ClientWantNewColor { new_color } => server_reader.client_change_color(&client_id, new_color).await,

@@ -76,7 +76,7 @@ fn create_only_owner_access_file(path: &Path) -> std::io::Result<fs::File> {
 
 #[cfg(windows)]
 fn create_only_owner_access_file(_path: &Path) -> std::io::Result<fs::File> {
-    todo!("create_owner_read_only_file is not implemented for windows yet.") 
+    todo!("create_only_owner_access_file is not implemented for windows yet.") 
 }
 
 #[cfg(unix)]

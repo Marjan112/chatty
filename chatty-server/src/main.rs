@@ -1,6 +1,6 @@
 use std::{
     io::Write,
-    fs,
+    fs, path::Path,
     net::{SocketAddr, IpAddr},
     collections::{HashMap, HashSet},
     hash::{Hash, Hasher, DefaultHasher},
@@ -63,6 +63,37 @@ async fn init_handshake<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> st
     Ok(())
 }
 
+#[cfg(unix)]
+fn create_only_owner_access_file(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(windows)]
+fn create_only_owner_access_file(_path: &Path) -> std::io::Result<fs::File> {
+    todo!("create_owner_read_only_file is not implemented for windows yet.") 
+}
+
+#[cfg(unix)]
+fn is_file_only_owner_access(path: &Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = fs::metadata(path)?;
+    let mode = metadata.permissions().mode();
+    
+    Ok((mode & 0o777) == 0o600)
+}
+
+#[cfg(windows)]
+fn is_file_only_owner_access(_path: &Path) -> std::io::Result<bool> {
+    todo!("is_file_only_owner_access is not implemented for windows yet.") 
+}
+
 struct ServerIdentity {
     certificate: CertificateDer<'static>,
     private_key: PrivateKeyDer<'static>,
@@ -73,6 +104,7 @@ impl ServerIdentity {
     fn load() -> std::io::Result<Self> {
         let home = std::env::home_dir()
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "home directory not found"))?;
+
         let chatty_config = home.join(".chatty");
         fs::create_dir_all(&chatty_config)?;
 
@@ -80,6 +112,12 @@ impl ServerIdentity {
         let key_path = chatty_config.join("server.key");
         
         let (certificate, private_key) = if cert_path.exists() && key_path.exists() {
+            match is_file_only_owner_access(&key_path) {
+                Ok(false) => return Err(std::io::Error::other("Cannot load private key file because it is unprotected.")),
+                Err(err) => return Err(std::io::Error::other(format!("Cannot load private key file metadata: {err}"))),
+                _ => {}
+            }
+
             let certificate = CertificateDer::from_pem_file(cert_path)
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
@@ -88,14 +126,22 @@ impl ServerIdentity {
 
             (certificate, private_key)
         } else {
+            if let Err(err) = fs::remove_file(&cert_path) && err.kind() != std::io::ErrorKind::NotFound {
+                return Err(std::io::Error::other(format!("Failed to remove obsolete {}: {}", cert_path.display(), err)));
+            }
+
+            if let Err(err) = fs::remove_file(&key_path) && err.kind() != std::io::ErrorKind::NotFound {
+                return Err(std::io::Error::other(format!("Failed to remove obsolete {}: {}", key_path.display(), err)));
+            }
+
             let cert = generate_simple_self_signed(Vec::new())
                 .map_err(|err| std::io::Error::other(err.to_string()))?;
 
             let certificate = CertificateDer::from(cert.cert.der().to_vec());
             let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()));
 
-            let mut cert_file = fs::File::create(&cert_path)?;
-            let mut key_file = fs::File::create(&key_path)?;
+            let mut cert_file = fs::File::create_new(&cert_path)?;
+            let mut key_file = create_only_owner_access_file(&key_path)?;
 
             cert_file.write_all(cert.cert.pem().as_bytes())?;
             key_file.write_all(cert.signing_key.serialize_pem().as_bytes())?;
